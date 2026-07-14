@@ -1,0 +1,214 @@
+[package]
+name = "klaay-cli"
+version = "0.1.0"
+edition = "2021"
+# Not currently published anywhere (no crates.io listing yet - see README).
+# "UNLICENSED" isn't a valid SPDX identifier (cargo publish and SPDX-aware
+# tooling would flag it) - license-file + a real proprietary-rights LICENSE
+# is the conventional way to express "not open source" without a bogus SPDX
+# expression.
+license-file = "LICENSE"
+# Machine-enforces the "not published anywhere" intent above - without this,
+# nothing stops an accidental `cargo publish` from actually uploading it.
+publish = false
+# The highest MSRV among our own direct dependencies (keyring 4.1.4 requires
+# 1.88.0; ureq/clap need 1.85, oauth2 needs 1.65) - verified against each
+# dependency's own Cargo.toml rather than assumed.
+rust-version = "1.88"
+description = "Command-line client for the Klaay API"
+# Kept despite `publish = false` above - not for crates.io (this crate is
+# never published there), but as accurate provenance for `cargo metadata`
+# consumers, IDE tooling, and anyone reading this manifest directly. Has no
+# effect on the "never published" guarantee `publish = false` already
+# enforces on its own.
+repository = "https://github.com/klaayinc/klaay"
+
+[[bin]]
+name = "klaay"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+ureq = { version = "3", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Cargo's default caret requirement - a bare "4.1.4" already means exactly
+# `>=4.1.4, <5.0.0`, so the equivalent explicit `>=`/`<` form used in an
+# earlier revision of this file was needlessly non-idiomatic. 4.1.4 (not a
+# bare "4") is the floor because that's the version whose MSRV (1.88.0) the
+# rust-version comment above cites - anything earlier is excluded. Not
+# tightened further to e.g. `<4.2` to guard against a future MSRV bump: that
+# has an asymmetric downside (it also blocks any patch/security release from
+# being picked up without a manual edit here, with no automated signal that
+# an upgrade exists) that `rust-toolchain.toml` already covers better - it
+# pins 1.88.0 at the toolchain level, so a future 4.x release raising its
+# MSRV further shows up as a clear `rust-version` build error instead.
+# On Linux, this crate needs D-Bus / Secret Service headers at compile time
+# (e.g. `apt-get install libdbus-1-dev pkg-config`) and a running Secret
+# Service daemon (gnome-keyring, kwallet, etc.) at runtime for the keychain
+# path to actually work - `token_store.rs`'s file fallback covers the case
+# where no such daemon is running, but the crate itself still needs to link
+# against these at build time. No CI job builds this crate yet; whichever one
+# does will need these packages in its Linux runner setup.
+keyring = "4.1.4"
+# No default features: oauth2's defaults (and its "reqwest-blocking" feature)
+# pull in reqwest as a second HTTP client stack alongside ureq. Instead we
+# implement oauth2's generic SyncHttpClient trait ourselves against our own
+# ureq agent (see sso.rs) - one HTTP client for the whole binary.
+#
+# "5.0", not a bare "5" - floored at the version actually resolved and tested
+# here (matching how keyring/zeroize are floored above), rather than letting
+# a lockfile-free build silently resolve to a future 5.x that changes the
+# SyncHttpClient trait signature sso.rs implements by hand, producing a
+# confusing trait-mismatch compile error far from this file.
+oauth2 = { version = "5.0", default-features = false }
+# Declared directly (not just relied on transitively through oauth2's
+# re-export) so the version contract is explicit - resolves to the same
+# 2.5.8 already pulled in by oauth2, no conflict.
+url = "2"
+# URL_SAFE_NO_PAD in auth.rs (JWT payload decoding) and STANDARD in upload.rs
+# (Content-MD5 Base64 encoding for ActiveStorage direct-upload) - two
+# distinct call sites, not a redundant transitive pull-in.
+base64 = "0.22"
+# Used exclusively for the Base64-encoded Content-MD5 header required by
+# ActiveStorage's direct-upload API (see upload.rs) - not used for any
+# security or integrity verification. The server is the authoritative
+# verifier; do not reuse this for security-sensitive hashing.
+#
+# Caret range, matching every other pre-1.0-style crate in this manifest
+# (base64, subtle, etc.) - an earlier revision pinned this to the exact patch
+# `=0.11.0` to guard against a future 0.11.x release introducing a breaking
+# change, but that risk applies equally to every pre-1.0 dependency here, not
+# specifically to this one, so singling it out for an exact pin was
+# inconsistent. The `cargo`/`/apps/cli` entry in `.github/dependabot.yml`
+# already covers getting a PR for any future minor bump on every crate in
+# this file, this one included.
+md-5 = "0.11"
+# dirs::config_dir() (see config.rs): XDG_CONFIG_HOME (falling back to
+# ~/.config) on Linux, ~/Library/Application Support on macOS, %APPDATA% on
+# Windows. Whatever that base directory turns out to be, this crate's own
+# "klaay" subdirectory underneath it is always created with 0700 (owner-only)
+# permissions on Unix (see token_store.rs's save_to_file), and the
+# credentials file within it with 0600 - so even an unusual XDG_CONFIG_HOME
+# (e.g. a shared directory) doesn't expose credential contents to other
+# local users, though the "klaay" directory's *name* could still be visible
+# to anyone who can list that unusual parent.
+#
+# v6, not v5 - simply the current major at the time this dependency was
+# added, no specific v5 incompatibility being worked around. Confirmed via
+# `cargo tree` that nothing else in this crate's dependency graph pulls in a
+# different `dirs` major, so there's no duplicate-version compilation/binary-
+# size concern from choosing v6 over v5 here.
+dirs = "6"
+rpassword = "7"
+# Already present transitively (via other deps); declared directly so
+# credentials (password, id_token, the stored bearer token) can be zeroized
+# out of memory once no longer needed. The "serde" feature is needed for
+# StoredToken (token_store.rs), which wraps the long-lived bearer JWT in
+# Zeroizing<String> and derives Serialize/Deserialize to persist it - not
+# for the password auth path, which deliberately avoids serde entirely
+# (see auth.rs's build_password_auth_body) so the password never touches a
+# serde_json::Value at all. The "derive" feature backs StoredToken's own
+# #[derive(Zeroize, ZeroizeOnDrop)] - every clone of it (e.g. inside
+# token_store.rs's file-fallback HashMap) gets zeroized on drop too, not
+# just the original.
+#
+# The "serde" feature is crate-wide, not scoped to specific types - it makes
+# transparent Serialize/Deserialize *possible* on any Zeroizing<T>, not just
+# the ones that actually need it. Today that's exactly two structs:
+# StoredToken (token_store.rs, above) and IdTokenFields (sso.rs, its
+# Zeroizing<String> id_token field). If a future sensitive value gets
+# wrapped in Zeroizing and added to a #[derive(Serialize)] struct without
+# thinking it through, this feature would let it serialize silently instead
+# of failing to compile - keep this comment's list current when that
+# changes.
+# KNOWN GAP (not closed by this dependency): on Windows, there's no
+# ACL-restricted way to persist the credentials fallback file at all - a
+# real fix needs a distinct dependency (e.g. `windows-acl`) that this
+# project has no Windows machine to verify against, so `atomic_write_secure`
+# (token_store.rs, `#[cfg(not(unix))]` twin) refuses to write the file
+# rather than writing it with the platform-default (often world-readable)
+# ACL. This only affects the rare case where the OS keychain (Windows
+# Credential Manager) itself is unavailable - Credential Manager has no
+# equivalent gap, so ordinary Windows use is unaffected. Zeroizing in-memory
+# copies doesn't help here either way; this is strictly an on-disk
+# permissions problem.
+# ANOTHER KNOWN GAP: `Zeroizing::new(serde_json::to_string(...)?)` (used
+# throughout token_store.rs) only guarantees the final returned `String`
+# allocation is cleared on drop - `serde_json::to_string` may grow its
+# output buffer via reallocation while serializing a large-enough value, and
+# any earlier, now-freed backing buffer from that growth is never zeroized.
+# In practice `StoredToken`'s JSON is small and single-object, so a
+# reallocation is unlikely, but this is not a guarantee the `Zeroizing` wrap
+# provides - closing it fully would need a pre-sized buffer (as
+# `auth.rs`'s `build_secret_auth_body` does by hand-computing capacity
+# up front) or a writer that serializes directly into an already-`Zeroizing`
+# buffer, avoiding `serde_json::to_string`'s internal allocation entirely.
+#
+# "1.9.0", not a bare "1" - this is a caret requirement (`>=1.9.0, <2.0.0`,
+# matching how `keyring` below floors at "4.1.4" rather than "4"), a minimum
+# version floor rather than an exact pin - `cargo update` can still float this
+# forward to a later 1.x.y. Floored above the actually resolved and tested
+# version specifically because, confirmed via zeroize's own CHANGELOG.md, this
+# crate's two real dependencies on its API both arrived well after 1.0: the
+# "derive" feature's `ZeroizeOnDrop` derive was added in 1.5.0, and the
+# "serde" feature in 1.5.7. A bare "1" range would let a lockfile-free build
+# silently resolve to any 1.x - including versions that predate one of those
+# two features entirely - with no compile error, just a confusing "no
+# method/derive named ..." far from this file.
+zeroize = { version = "1.9.0", features = ["serde", "derive"] }
+# Opens the SSO auth URL in the system browser without going through
+# cmd.exe's own command-line reparsing on Windows (which can reinterpret
+# `%`/`^` inside the URL) - one small, well-established dependency instead
+# of three hand-rolled per-OS branches.
+open = "5"
+# Already present transitively (pulled in by crypto crates like `ring`);
+# declared directly for `ConstantTimeEq` - sso.rs's loopback-redirect CSRF
+# `state` check compares against a value a local adversary could otherwise
+# probe via repeated connections, so it's compared in constant time rather
+# than with `!=`, which would leak timing information about how many
+# leading bytes matched.
+subtle = "2"
+
+[dev-dependencies]
+# Serializes the env-var-mutating tests in config.rs's test module -
+# `std::env::set_var`/`remove_var` are process-global, and `cargo test` runs
+# tests concurrently by default, so without this two tests setting different
+# values for the same env var could race and produce flaky results.
+serial_test = "3"
+# RAII wrapper around std::env::set_var/remove_var for those same tests -
+# restores whatever value (or absence) the variable had before the test ran
+# once the scoped closure returns, including on panic, rather than each test
+# hand-rolling its own set_var/remove_var pairs that only run on the
+# non-panicking path.
+temp-env = "0.3"
+
+[profile.release]
+# "thin" rather than fat LTO - still gets most of the size/speed win over no
+# LTO at all, but cuts link time roughly in half versus fat LTO (which links
+# the entire crate graph in one LLVM pass), a real cost for a CLI binary that
+# gets rebuilt often in CI and local dev.
+lto = "thin"
+# With the default of 16 codegen units, each unit is optimized independently
+# before thin LTO merges them at the link step - cross-unit inlining only
+# happens then, not during the initial per-unit optimization pass. A single
+# unit gives LLVM the whole crate to work with up front, producing a
+# meaningfully smaller/faster binary for a tool that's installed once and run
+# many times by an end user - worth the extra release-build time even though
+# no CI job builds this in release mode today.
+codegen-units = 1
+# "none", not "debuginfo" - `[profile.release]` applies to every target this
+# crate is ever cross-compiled for, and Cargo's `strip` setting maps to a
+# different underlying tool per platform (dwarfdump-verified empirically to
+# keep named symbols on macOS/arm64, but never checked against Linux's
+# objcopy/llvm-strip or Windows' link.exe). A per-target strip setting isn't
+# expressible in today's Cargo.toml profile syntax, and no CI job builds
+# (let alone symbol-inspects) a release binary for any other target, so
+# there's no way to catch a platform where "debuginfo" silently also drops
+# the symbol table - which would produce unsymbolicated user-reported panic
+# backtraces with no way to tell it happened. "none" trades a slightly
+# larger binary for a guarantee that holds on every target uniformly;
+# revisit once a real cross-compilation pipeline exists to verify
+# "debuginfo" per target (see the plan's "explicitly out of scope for this
+# pass" distribution-channel note).
+strip = "none"

@@ -1,0 +1,15 @@
+[toolchain]
+# Exact patch version, deliberately - not "1.88" or "stable". Dependabot
+# doesn't bump this file, so an exact pin means it stays fixed until a human
+# updates it, which is the point: every contributor and every CI run gets a
+# byte-identical compiler/rustfmt/clippy, with no chance of a new patch
+# release silently changing lint output or codegen between machines. The
+# tradeoff (missing automatic bug-fix releases) is accepted - `rust-version`
+# in Cargo.toml is the actual MSRV floor this crate needs; this file pins
+# the specific version used to build/verify it, not the minimum supported.
+channel = "1.88.0"
+# Ensures every contributor/CI run has the exact same formatter/linter
+# available too, not just the compiler - without this, `cargo fmt`/`cargo
+# clippy` would silently fall back to whatever component version (or none)
+# happens to already be installed on that machine.
+components = ["rustfmt", "clippy"]

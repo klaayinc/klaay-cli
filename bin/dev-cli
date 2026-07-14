@@ -1,0 +1,30 @@
+#!/usr/bin/env sh
+# Run the CLI against a local Kiln with an always-fresh build - WITHOUT taking
+# over the terminal. `cargo run` rebuilds only when sources changed, so the
+# default mode is one-shot: build if needed, run your command, return to the
+# prompt.
+#
+#   bin/dev-cli list selected_controls        # one-shot (default)
+#   bin/dev-cli --watch list selected_controls
+#
+# --watch is the opt-in save-rerun loop: it re-executes the command on every
+# source change and HOLDS the terminal until Ctrl-C (uses watchexec - the
+# maintained watcher; cargo-watch is unmaintained since Oct 2024. Install:
+# `brew install watchexec` or `cargo install watchexec-cli`).
+#
+# KLAAY_API_URL defaults to local Kiln (bin/dev's default port) unless set.
+set -e
+cd "$(dirname "$0")/.."
+export KLAAY_API_URL="${KLAAY_API_URL:-http://localhost:3000}"
+
+if [ "${1:-}" = "--watch" ]; then
+  shift
+  if ! command -v watchexec >/dev/null 2>&1; then
+    echo "error: watchexec not found on PATH." >&2
+    echo "Install it with: cargo install watchexec-cli   (or: brew install watchexec)" >&2
+    exit 1
+  fi
+  exec watchexec --restart --clear -w src -w Cargo.toml -- cargo run --quiet -- "$@"
+fi
+
+exec cargo run --quiet -- "$@"
