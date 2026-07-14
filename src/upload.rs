@@ -414,7 +414,7 @@ pub(crate) fn direct_upload(
         fail(
             prior_successes,
             format_args!(
-                "Direct upload setup succeeded ({status}) but the response body wasn't valid JSON."
+                "Direct upload setup succeeded ({status}) but returned no usable JSON body."
             ),
         )
     });

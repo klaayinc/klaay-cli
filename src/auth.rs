@@ -654,14 +654,14 @@ fn login_with_credentials(config: &Config, credentials: Credentials, account: Op
     let response = post_authenticate(config, &credentials, account.as_deref());
     // `is_success()` (which also accounts for an unparseable 2xx body), not
     // a raw `status != 201` check - the latter would fall through to
-    // `require_token` on a 201 response whose body failed to parse, since
-    // that comparison has no way to see `json_parse_failed`.
+    // `require_token` on a 201 response whose body failed to parse, since a
+    // status comparison can't see that the body never parsed.
     if !response.is_success() {
         print_login_error_and_exit(response.status, &response.error_detail());
     }
     let body = response.body().unwrap_or_else(|| {
         eprintln!(
-            "Login succeeded ({}) but the response body wasn't valid JSON.",
+            "Login succeeded ({}) but returned no usable JSON body.",
             response.status
         );
         std::process::exit(1);
@@ -805,7 +805,7 @@ fn login_with_credentials(config: &Config, credentials: Credentials, account: Op
         }
         let body = response.body().unwrap_or_else(|| {
             eprintln!(
-                "Account upgrade succeeded ({}) but the response body wasn't valid JSON.",
+                "Account upgrade succeeded ({}) but returned no usable JSON body.",
                 response.status
             );
             std::process::exit(1);

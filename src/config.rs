@@ -7,6 +7,30 @@ use std::path::PathBuf;
 // independently-typed literal would.
 pub(crate) const DEFAULT_API_URL: &str = "https://api.klaay.com";
 
+/// The invoked binary's own name, for "run `<this> ...`" hints. Lives here (a
+/// foundational module) rather than in `schema`/`client` so any layer can use
+/// it without an upward dependency. Computed once and cached.
+pub(crate) fn bin_name() -> &'static str {
+    static BIN_NAME: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        // `args_os()`, not `args()` - `args()` panics on a non-UTF-8 argv[0];
+        // `args_os()` lets it fall through to the `.to_str()` -> `None`
+        // fallback below.
+        std::env::args_os()
+            .next()
+            .and_then(|p| {
+                // `file_stem`, not `file_name` - strips the `.exe` on Windows so
+                // hints read `klaay resources`, not `klaay.exe resources`. A
+                // no-op on Unix, where the binary has no extension.
+                std::path::Path::new(&p)
+                    .file_stem()
+                    .and_then(|f| f.to_str())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| env!("CARGO_BIN_NAME").to_string())
+    });
+    &BIN_NAME
+}
+
 #[derive(Debug, PartialEq)]
 pub(crate) struct Config {
     // Private - `resolve()` is the only way to construct a `Config`, so this

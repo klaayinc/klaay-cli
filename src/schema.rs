@@ -1,88 +1,30 @@
 use crate::client::{ApiClient, HttpMethod};
-use crate::config::openapi_cache_path;
+use crate::config::{bin_name, openapi_cache_path};
 use serde_json::Value;
 use std::fs;
 use std::io::{BufWriter, Write};
 
-/// The invoked binary's own name, for user-facing "run `<this> ...`" hints -
-/// avoids hardcoding "klaay" in multiple places, which would go stale if the
-/// binary were ever renamed. `pub(crate)` so other modules (e.g.
-/// token_store.rs's corrupted-credentials-file message) can reuse it
-/// instead of hardcoding their own copy of "klaay". Computed once and
-/// cached, since the binary name can't change during a process's lifetime;
-/// repeated calls (this file's own call site in `describe`, plus
-/// token_store.rs's) would otherwise each re-read `std::env::args()` and
-/// re-allocate for a value that's always the same.
-pub(crate) fn bin_name() -> &'static str {
-    static BIN_NAME: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        // `args_os()`, not `args()` - `args()` panics during iteration if any
-        // argument isn't valid Unicode, which includes argv[0] itself: a
-        // non-UTF-8 invocation path would panic on the very first `.next()`
-        // call below, never reaching the `.to_str()` fallback this comment
-        // used to claim handled that case gracefully. `args_os()` returns
-        // `OsString`s that never panic, so a non-UTF-8 argv[0] falls through
-        // to `.to_str()` returning `None` (via `Path::file_name()`'s
-        // `.to_str()`) exactly as intended.
-        //
-        // `.to_str()` + `.map(str::to_owned)`, not `.to_string_lossy().
-        // into_owned()` - the filename of a Rust binary is always valid
-        // UTF-8 in practice, so `to_string_lossy()`'s `Cow<str>` is always
-        // the `Borrowed` variant here, and `into_owned()` still forces a
-        // heap allocation regardless of which variant it is. `.to_str()`
-        // returning `None` (non-UTF-8 path) falls through to the same
-        // `unwrap_or_else` fallback as a missing argv[0].
-        std::env::args_os()
-            .next()
-            .and_then(|p| {
-                std::path::Path::new(&p)
-                    .file_name()
-                    .and_then(|f| f.to_str())
-                    .map(str::to_owned)
-            })
-            .unwrap_or_else(|| env!("CARGO_BIN_NAME").to_string())
-    });
-    &BIN_NAME
-}
-
-/// Fetches GET /openapi (authenticated, no admin requirement) and caches it
-/// locally. The spec is Kiln's own generated OpenAPI document - the same one
-/// CI's `documentation` job produces and every deployed image ships - so this
-/// reflects the live API rather than anything hand-maintained in the CLI.
-/// Returns `Err` (rather than exiting internally) on API failure, so the
-/// hard-exit contract isn't hidden behind a signature that implies this
-/// always succeeds - the caller in `main.rs` handles printing/exiting,
-/// consistent with how every other fallible command's `client.*` call
-/// already surfaces failure via a return value it inspects.
+/// Fetches GET /openapi (authenticated) and caches it locally. The spec is
+/// Kiln's own generated OpenAPI document, so this reflects the live API.
+/// Returns `Err` on failure; `main.rs` handles printing/exiting.
 pub(crate) fn fetch_spec(client: &ApiClient, force_refresh: bool) -> Result<Value, String> {
-    // No home directory to cache under - just always live-fetch instead of
-    // treating this as fatal; `resources`/`describe` work fine without a
-    // cache, just slower.
+    // No home directory to cache under - just live-fetch;
+    // `resources`/`describe` work fine without a cache, just slower.
     let cache_path = openapi_cache_path();
     if !force_refresh {
         if let Some(path) = &cache_path {
             if let Ok(contents) = fs::read_to_string(path) {
                 if let Ok(mut cached) = serde_json::from_str::<Value>(&contents) {
-                    // The cache is a single shared file regardless of which
-                    // `--api-url` is active - without checking `api_url`
-                    // here, switching environments (e.g. production to a
-                    // local dev server) would silently keep serving the
-                    // previous environment's schema (wrong field names,
-                    // relationships, filters) with no indication anything
-                    // was stale. Older cache files (written before this
-                    // check existed) have no `api_url` key at all and are
-                    // therefore always treated as stale rather than assumed
-                    // to match.
+                    // The cache is one shared file across `--api-url` values,
+                    // so it's keyed by `api_url`: switching environments must
+                    // not serve the previous environment's schema. Older cache
+                    // files without an `api_url` key are always treated as
+                    // stale.
                     let cached_api_url = cached.get("api_url").and_then(|v| v.as_str());
                     if cached_api_url == Some(client.base_url_trimmed()) {
-                        // `.take()`, not `.clone()` - `cached` (and its
-                        // potentially multi-megabyte "spec" tree) is dropped
-                        // right after this block regardless, so cloning it
-                        // out would pay for a full deep copy of the parsed
-                        // OpenAPI document just to hand back a value that's
-                        // about to be the only owner anyway. `take()` swaps
-                        // in `Value::Null` and moves the real value out in
-                        // its place, at the cost of one `Value::Null`
-                        // allocation-free write instead.
+                        // `.take()`, not `.clone()` - `cached` is dropped right
+                        // after this block, so move the (potentially
+                        // multi-megabyte) spec out instead of deep-copying it.
                         if let Some(spec) = cached.get_mut("spec") {
                             return Ok(spec.take());
                         }
@@ -97,37 +39,22 @@ pub(crate) fn fetch_spec(client: &ApiClient, force_refresh: bool) -> Result<Valu
         return Err(format!(
             "Could not fetch /openapi ({}): {}",
             response.status,
-            // `error_detail()`, not a hand-rolled `serde_json::to_string` on
-            // the raw body - `to_string` on a `&Value` is infallible (every
-            // `Value` variant serializes successfully), so the fallback
-            // branch that used to be here was dead code. `error_detail()`
-            // also distinguishes a JSON-parse failure from a genuinely empty
-            // body, which re-serializing `raw_body()` alone cannot.
+            // `error_detail()` distinguishes a JSON-parse failure from a
+            // genuinely empty body, which re-serializing `raw_body()` cannot.
             response.error_detail()
         ));
     }
-    // The entire cache-write attempt - creating the cache directory, the
-    // stale-temp-file scan, and the write-and-rename itself - is Unix-only,
-    // gated as one block rather than gating just the write step. Nothing in
-    // this cache is ever created or read on non-Unix (see the write step's
-    // own `#[cfg(not(unix))]` non-write note below), so unconditionally
-    // running `fs::create_dir_all` on every platform - as an earlier
-    // revision did - created the config directory on every single
-    // `resources`/`describe` invocation on Windows even though nothing was
-    // ever placed in it from this code path.
+    // The whole cache-write attempt is Unix-only (nothing here is created or
+    // read on non-Unix - see the non-Unix note below), gated as one block so
+    // Windows doesn't create the config directory it never writes to.
     #[cfg(unix)]
     if let Some(cache_path) = &cache_path {
         if let Some(dir) = cache_path.parent() {
-            // 0700 (owner-only), matching `token_store.rs`'s `save_to_file` -
-            // this is the same shared `~/.config/klaay` directory
-            // (`config::config_dir()`), not a separate one, but a machine
-            // with a working OS keyring never calls `save_to_file` at all
-            // (the token lives in the keychain, not a file), so `login`
-            // alone doesn't guarantee this directory has ever been created.
-            // If `resources`/`describe` is the first command to touch it,
-            // a plain `create_dir_all` would leave it at the process
-            // umask's default (often 0755, world-readable+executable),
-            // letting another local user enumerate its contents.
+            // 0700 (owner-only), matching `token_store.rs`'s `save_to_file`.
+            // This shared `~/.config/klaay` directory may not exist yet (a
+            // keyring machine never writes a token file), so if
+            // `resources`/`describe` creates it first, a plain
+            // `create_dir_all` would leave it world-readable per the umask.
             use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
             let create_result = fs::DirBuilder::new()
                 .recursive(true)
@@ -139,10 +66,8 @@ pub(crate) fn fetch_spec(client: &ApiClient, force_refresh: bool) -> Result<Valu
                     dir.display()
                 );
             } else {
-                // Unconditional, not just on first creation - `DirBuilder`'s
-                // `mode` only applies when it actually creates the
-                // directory, so a pre-existing directory (e.g. left over
-                // from before this check existed) needs this to actually
+                // Unconditional - `DirBuilder`'s `mode` only applies when it
+                // creates the directory, so a pre-existing one needs this to
                 // get tightened.
                 if let Err(e) = fs::set_permissions(dir, fs::Permissions::from_mode(0o700)) {
                     eprintln!(
@@ -151,46 +76,28 @@ pub(crate) fn fetch_spec(client: &ApiClient, force_refresh: bool) -> Result<Valu
                     );
                 }
                 remove_stale_cache_temp_files(dir);
-                // Sibling temp file, renamed atomically over the real
-                // path, so a process interrupted mid-write (SIGKILL,
-                // power loss) can't leave a truncated cache file for a
-                // concurrent reader to see. Mixes the process id with a
-                // nanosecond timestamp (not just the pid alone) - pids
-                // wrap around and get reused by unrelated processes, so a
-                // pid-only name could still collide with a stale temp
-                // file from an earlier process that happened to reuse
-                // the same pid.
+                // Sibling temp file, renamed atomically over the real path, so
+                // an interrupted write can't leave a truncated cache for a
+                // concurrent reader. Mixes pid with a nanosecond timestamp
+                // since pids are reused and could otherwise collide.
                 let unique = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_nanos())
                     .unwrap_or_else(|_| {
-                        // Clock is before the epoch (broken/skewed
-                        // container clock) - falling back to a fixed
-                        // value like 0 would collide with another
-                        // process hitting the same fallback, defeating
-                        // the whole point of mixing in a timestamp. A
-                        // process-local atomic counter is still unique
-                        // per call within this process, and combined
-                        // with the pid below is enough to avoid
-                        // collisions even in this degenerate case.
+                        // Clock before the epoch (broken/skewed clock) - a
+                        // fixed fallback would collide across processes, so use
+                        // a process-local counter, unique per call and, with
+                        // the pid, across processes.
                         static FALLBACK: std::sync::atomic::AtomicU64 =
                             std::sync::atomic::AtomicU64::new(1);
                         u128::from(FALLBACK.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
                     });
                 let tmp_path = cache_path
                     .with_file_name(format!("openapi-cache-{}-{unique}.tmp", std::process::id()));
-                // Explicit `0o600` - matches `token_store.rs`'s
-                // credential files in this same config directory rather
-                // than relying solely on the user's umask. The cache
-                // holds the `api_url` (potentially an internal endpoint)
-                // and the full OpenAPI spec.
-                //
-                // `create_new` (not `File::create`, which truncates a
-                // stale file with the same name silently) - if the
-                // unique-name logic above ever produced a genuine
-                // collision, this fails loudly with an `AlreadyExists`
-                // error instead of quietly overwriting whatever was
-                // already at that path.
+                // `0o600` - matches `token_store.rs`'s credential files rather
+                // than resting on the umask; the cache holds the `api_url` and
+                // full spec. `create_new` (not `File::create`) fails loudly on
+                // a name collision instead of silently truncating.
                 use std::os::unix::fs::OpenOptionsExt;
                 let write_result = fs::OpenOptions::new()
                     .write(true)
@@ -199,41 +106,14 @@ pub(crate) fn fetch_spec(client: &ApiClient, force_refresh: bool) -> Result<Valu
                     .open(&tmp_path)
                     .and_then(|file| {
                         let mut writer = BufWriter::new(file);
-                        // Explicit `io::Error::other` rather than
-                        // `std::io::Error::from` (a `serde_json::Error ->
-                        // io::Error` blanket `From` impl that does the
-                        // exact same thing under the hood) - semantically
-                        // identical either way, but spelling it out here
-                        // makes it obvious this is deliberately
-                        // collapsing a genuine (if rare, for this value
-                        // type) JSON serialization failure into the same
-                        // `io::Error` type as a real I/O failure, rather
-                        // than an accidental side effect of `?`.
-                        //
-                        // Explicitly flushes (and propagates any flush
-                        // error) rather than relying on BufWriter's
-                        // implicit flush-on-drop, which silently
-                        // discards a failure - serde_json::to_writer can
-                        // return Ok(()) while buffered bytes are still
-                        // sitting in the BufWriter, and the rename below
-                        // would then promote a truncated temp file to
-                        // the real cache path.
-                        //
-                        // Wrapped with the `api_url` this spec was
-                        // actually fetched from - `fetch_spec`'s read
-                        // path compares this against the currently
-                        // active `api_url` before trusting the cache, so
-                        // switching environments can't silently serve a
-                        // different environment's schema.
-                        //
-                        // Serialized field-by-field directly into the
-                        // writer, not via `serde_json::json!({"spec":
-                        // response.raw_body(), ...})` - embedding a
-                        // `&Value` in `json!` produces a full clone of the
-                        // entire spec tree (potentially multi-megabyte)
-                        // just to immediately serialize it, when
-                        // `raw_body()` can be serialized directly without
-                        // ever building that intermediate `Value`.
+                        // Explicit flush (and error propagation) rather than
+                        // BufWriter's flush-on-drop, which discards failures:
+                        // `to_writer` can return `Ok` with bytes still buffered,
+                        // and the rename below would then promote a truncated
+                        // file. Serialized field-by-field (not via `json!`) to
+                        // avoid cloning the whole spec tree just to serialize
+                        // it; `api_url` is stored so the read path can reject a
+                        // different environment's cache.
                         use serde::ser::SerializeMap;
                         use serde::Serializer as _;
                         serde_json::Serializer::new(&mut writer)
@@ -247,32 +127,17 @@ pub(crate) fn fetch_spec(client: &ApiClient, force_refresh: bool) -> Result<Valu
                             .and_then(|()| writer.flush())
                     });
                 if let Err(e) = write_result {
-                    // `tmp_path`, not `cache_path` - the operation that
-                    // actually failed (open/write/flush) was against the
-                    // temp file, so showing the final cache path here
-                    // would mislead anyone diagnosing e.g. a permissions
-                    // error.
+                    // `tmp_path`, not `cache_path` - the failed operation was
+                    // against the temp file.
                     eprintln!(
                         "Warning: could not write spec cache to {}: {e}",
                         tmp_path.display()
                     );
-                    // Best-effort cleanup - but skipped on
-                    // `AlreadyExists`. This uses `create_new` (not
-                    // `File::create`), so an `AlreadyExists` error means
-                    // the temp file genuinely exists already. The
-                    // precise invariant established by the scan just
-                    // above (`remove_stale_cache_temp_files`, which only
-                    // removes files older than an hour) is: any file
-                    // with this exact name that still exists at this
-                    // point is less than an hour old - so it almost
-                    // certainly belongs to another concurrent process
-                    // still actively writing it right now, not an
-                    // orphaned leftover this same scan would already
-                    // have caught. Removing it here would corrupt that
-                    // other process's in-flight write. Every other
-                    // error kind (permissions, disk full, a write/flush
-                    // failure after `open` succeeded) means *this* call
-                    // created the file, so cleaning it up is safe.
+                    // Cleanup skipped on `AlreadyExists`: with `create_new`,
+                    // that means the file exists, and the stale-scan above
+                    // guarantees it's under an hour old - so it belongs to
+                    // another concurrent writer, not this call. Every other
+                    // error kind means this call created the file.
                     if e.kind() != std::io::ErrorKind::AlreadyExists {
                         let _ = fs::remove_file(&tmp_path);
                     }
@@ -286,29 +151,15 @@ pub(crate) fn fetch_spec(client: &ApiClient, force_refresh: bool) -> Result<Valu
             }
         }
     }
-    // Non-Unix: skip caching entirely, silently - writing with default
-    // (potentially world-readable) permissions isn't an option, same
-    // reasoning as `token_store.rs`'s `atomic_write_secure`, which
-    // explicitly refuses to write its credentials fallback file on non-Unix
-    // rather than write it with an uncontrolled ACL. A cache miss here just
-    // means the next `resources`/`describe` call live-fetches instead of
-    // reading a local copy - much cheaper to accept than for the credentials
-    // case, since nothing else depends on this file existing, so there's no
-    // warning to print, and (per the `#[cfg(unix)]` above) not even an
-    // attempt made.
+    // Non-Unix: no caching (can't control the file's permissions, same
+    // reasoning as `token_store.rs`'s `atomic_write_secure`). The next call
+    // just live-fetches, so there's nothing to warn about.
     Ok(response.into_raw_body())
 }
 
-/// Best-effort cleanup of `openapi-cache-*.tmp` files left behind by a
-/// process that was killed (SIGKILL, power loss) between creating its temp
-/// file and renaming it over the real cache path - nothing else in the CLI
-/// ever scans for these, so without this they'd accumulate in the cache
-/// directory indefinitely. Only removes files older than an hour, so a temp
-/// file actively being written by another concurrent CLI invocation right
-/// now is never touched.
-///
-/// `#[cfg(unix)]` - its sole call site (in `fetch_spec`) is itself inside a
-/// `#[cfg(unix)]` block, since these temp files are only ever created there.
+/// Best-effort cleanup of `openapi-cache-*.tmp` files left by a process killed
+/// mid-write, which would otherwise accumulate. Only removes files older than
+/// an hour, so a temp file another invocation is actively writing is untouched.
 #[cfg(unix)]
 fn remove_stale_cache_temp_files(dir: &std::path::Path) {
     const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
@@ -323,18 +174,10 @@ fn remove_stale_cache_temp_files(dir: &std::path::Path) {
         if !name.starts_with(prefix) || !name.ends_with(suffix) {
             continue;
         }
-        // Requires the portion between `prefix` and `.tmp` to look like this
-        // crate's own `{pid}-{unique}` naming (digits and hyphens only,
-        // exactly one hyphen) - analogous to `token_store.rs`'s equivalent
-        // stale-temp-file scan, but not identical: that one requires exactly
-        // two hyphens, for its own `{pid}-{nanos}-{counter}` naming. Each
-        // count is correct for its own format; "analogous", not "matches",
-        // to avoid implying the two checks are interchangeable.
-        // `starts_with`/`ends_with` alone would also match a
-        // name like `openapi-cache-editor-backup.tmp`, a plausible file for
-        // an editor or another tool to drop in this same cache directory,
-        // and silently delete it an hour later even though this CLI never
-        // wrote it.
+        // Require the portion between `prefix` and `.tmp` to match this crate's
+        // own `{pid}-{unique}` naming (digits, exactly one hyphen) so a
+        // same-prefix file another tool dropped here (e.g.
+        // `openapi-cache-editor-backup.tmp`) isn't deleted.
         let middle = &name[prefix.len()..name.len() - suffix.len()];
         if middle.is_empty()
             || !middle.chars().all(|c| c.is_ascii_digit() || c == '-')
@@ -344,34 +187,13 @@ fn remove_stale_cache_temp_files(dir: &std::path::Path) {
         {
             continue;
         }
-        // `.ok()` on the metadata/modified steps (not `io::Error::other` to
-        // force `SystemTimeError` through an `io::Result` chain) - a clock
-        // going backwards has nothing to do with I/O, and coercing it into
-        // `io::Error` just to keep using `.and_then` allocates a box for a
-        // value that's immediately discarded anyway.
-        //
-        // `duration_since` failing means `modified` is *after* `now` (clock
-        // skew, an NTP correction, or a file copied from another host with a
-        // future timestamp) - checked against the same `STALE_AFTER`
-        // threshold in the other direction (`e.duration()` is how far in the
-        // future it is), not treated as unconditionally stale. A file dated
-        // only a few seconds/minutes ahead - plausible minor clock skew
-        // between two machines/processes - could otherwise be deleted while
-        // a concurrent process is still actively writing to it, corrupting
-        // that write. A file dated hours or days ahead is still caught here
-        // immediately rather than waiting for the real clock to catch up to
-        // it, which is what "not stale" would otherwise mean.
-        // `symlink_metadata` (not `entry.metadata()`/`entry.file_type()`
-        // separately) for both the staleness check and the type guard below
-        // - `entry.metadata()` follows a symlink to its target's mtime while
-        // `entry.file_type()` does not follow it for the type, so a symlink
-        // named like a stale temp file (target's mtime old, but the entry
-        // itself is a symlink) would previously see `is_stale = true` yet
-        // never pass the `is_file()` type guard, leaving it to accumulate
-        // indefinitely instead of either being cleaned up or consistently
-        // left alone. Using the same (non-following) metadata for both
-        // checks means they always agree about which single entry they're
-        // describing.
+        // A future `modified` (clock skew, NTP correction, cross-host copy) is
+        // checked against `STALE_AFTER` in the other direction rather than
+        // treated as unconditionally stale, so a file another process is
+        // actively writing a few minutes ahead isn't deleted. `symlink_metadata`
+        // (non-following) is used for both this and the type guard below so
+        // they agree on the same entry - `entry.metadata()` would follow a
+        // symlink for the mtime but `entry.file_type()` wouldn't for the type.
         let symlink_meta = entry.path().symlink_metadata().ok();
         let is_stale = match symlink_meta.as_ref().and_then(|m| m.modified().ok()) {
             Some(modified) => match std::time::SystemTime::now().duration_since(modified) {
@@ -380,13 +202,8 @@ fn remove_stale_cache_temp_files(dir: &std::path::Path) {
             },
             None => false,
         };
-        // Not traversed through a symlink, matching `symlink_meta` above -
-        // makes the intent ("this scan only ever touches regular temp files
-        // it created") explicit and platform-consistent: `fs::remove_file`
-        // on a symlink removes the symlink itself on Unix, but fails with a
-        // permission error on Windows for a symlink to a directory - a
-        // silent cross-platform behavior difference this guard avoids
-        // relying on either way.
+        // Regular files only - the scan should only ever remove temp files it
+        // created, not follow a symlink.
         let is_regular_file = symlink_meta.as_ref().map(|m| m.is_file()).unwrap_or(false);
         if is_stale && is_regular_file {
             let _ = fs::remove_file(entry.path());
@@ -394,10 +211,8 @@ fn remove_stale_cache_temp_files(dir: &std::path::Path) {
     }
 }
 
-/// A resource's own generated tag description, if the operation declares one -
-/// this is where Kiln's filters/sortable-fields tables actually live (see
-/// public/tags/**/*.md augmentation, kiln-openapi skill), not in per-parameter
-/// metadata.
+/// A resource's generated tag description - where Kiln's filters/sortable-fields
+/// tables live (see the kiln-openapi skill), not in per-parameter metadata.
 fn tag_description<'a>(spec: &'a Value, tag_name: &str) -> Option<&'a str> {
     spec.get("tags")?
         .as_array()?
@@ -405,6 +220,274 @@ fn tag_description<'a>(spec: &'a Value, tag_name: &str) -> Option<&'a str> {
         .find(|t| t.get("name").and_then(|n| n.as_str()) == Some(tag_name))
         .and_then(|t| t.get("description"))
         .and_then(|d| d.as_str())
+}
+
+/// Up to 5 collection resource names resembling `query`, for "did you mean"
+/// hints when a lookup misses. Matches by substring either way, case-folded
+/// and with a trailing `s` trimmed so singular input (`control`) reaches
+/// `selected_controls`.
+fn suggest_resources(spec: &Value, query: &str) -> Vec<String> {
+    let q = query.to_ascii_lowercase();
+    // Strip at most one trailing `s` (the plural suffix) - `trim_end_matches`
+    // would over-strip `access` -> `acce`, corrupting the substring match.
+    let q_singularish = q.strip_suffix('s').unwrap_or(&q);
+    let Some(paths) = spec.get("paths").and_then(|p| p.as_object()) else {
+        return Vec::new();
+    };
+    let matches = paths
+        .keys()
+        .filter_map(|path| path.strip_prefix('/'))
+        // Collection routes only; member/nested paths aren't valid `describe`
+        // arguments. A root `"/"` strips to `""` - drop it explicitly rather than
+        // rely on the length guards below to filter an empty name out.
+        .filter(|name| !name.is_empty() && !name.contains('/'))
+        .filter(|name| {
+            let n = name.to_ascii_lowercase();
+            let n_singularish = n.strip_suffix('s').unwrap_or(&n);
+            // Both needles need >= 2 chars: `contains` on a 0- or 1-char needle
+            // matches almost everything, flooding the hints for a typo like `a`.
+            (q_singularish.len() >= 2 && n.contains(q_singularish))
+                || (n_singularish.len() >= 2 && q.contains(n_singularish))
+        });
+    // Rank shortest first (common resources outrank long generated join names),
+    // then prefix matches ahead of mid-string ones. The case-insensitive prefix
+    // test compares bytes directly, with no per-element lowercase allocation
+    // (`q_singularish` is already lowercased ASCII, as are resource names).
+    let mut ranked: Vec<(usize, bool, &str)> = matches
+        .map(|name| {
+            // Prefix in either direction, mirroring the two-directional filter
+            // above: the resource name starts with the query, or the query
+            // starts with the resource name. Compared byte-wise via
+            // `eq_ignore_ascii_case` - no lowercase allocation. `n_len` drops one
+            // trailing `s` (resource names are lowercase, so the byte check is
+            // enough).
+            let n_len = name.len() - usize::from(name.ends_with('s'));
+            let is_prefix = name
+                .as_bytes()
+                .get(..q_singularish.len())
+                .is_some_and(|p| p.eq_ignore_ascii_case(q_singularish.as_bytes()))
+                || q.as_bytes()
+                    .get(..n_len)
+                    .is_some_and(|p| p.eq_ignore_ascii_case(&name.as_bytes()[..n_len]));
+            (name.len(), !is_prefix, name)
+        })
+        .collect();
+    // `name` as a tertiary key so ties on (len, not_prefix) are ordered
+    // deterministically (alphabetically) rather than by unstable-sort chance.
+    ranked.sort_unstable_by_key(|&(len, not_prefix, name)| (len, not_prefix, name));
+    ranked.truncate(5);
+    ranked
+        .into_iter()
+        .map(|(_, _, name)| name.to_string())
+        .collect()
+}
+
+/// Which of the two auto-generated single-column tables is currently being
+/// captured (their rows feed `describe`'s merged filter/sort output rather than
+/// printing raw). `Off` means any other line prints as-is. Named `Off` rather
+/// than `None` to avoid visual collision with `Option::None`.
+enum Capturing {
+    Off,
+    Filters,
+    Sortable,
+}
+
+/// Prints a tag description's prose (and any curated tables) to stdout while
+/// capturing the two auto-generated single-column tables (`Filters`,
+/// `Sortable Fields`) as `(filters, sortable_fields)`, so `describe` can merge
+/// them with the structured `parameters` instead of dumping them raw.
+fn render_tag_description(text: &str) -> (Vec<String>, Vec<String>) {
+    let mut filters = Vec::new();
+    let mut sortable = Vec::new();
+    let mut capturing = Capturing::Off;
+    // So a structurally-empty description doesn't emit a lone trailing newline.
+    let mut printed = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        // A row either starts with `|` (standard markdown) or - only while we're
+        // already inside one of Kiln's tables - ends with `|`: its generator
+        // emits continuation rows like `state_include |` with no leading pipe.
+        // Gating the trailing-pipe case on `capturing` means ordinary prose that
+        // merely ends with `|` outside a table is printed as prose, not
+        // captured. Any non-row line ends the capture (blank lines are
+        // collapsed, not printed).
+        let is_table_row = trimmed.starts_with('|')
+            || (!matches!(capturing, Capturing::Off) && trimmed.ends_with('|'));
+        if !is_table_row {
+            capturing = Capturing::Off;
+            if !trimmed.is_empty() {
+                println!("{}", strip_markdown_link(trimmed));
+                printed = true;
+            }
+            continue;
+        }
+        if is_separator_row(trimmed) {
+            continue;
+        }
+        let cells: Vec<String> = trimmed
+            .trim_matches(|c| c == '|' || c == ' ')
+            .split('|')
+            .map(|c| strip_markdown_link(c.trim()))
+            .filter(|c| !c.is_empty())
+            .collect();
+        if cells.is_empty() {
+            continue;
+        }
+        // Check for a special-table header first, whatever the current state, so
+        // a second auto-generated table that follows the first with no blank
+        // line between them (`| Sortable Fields |` right after the filter rows)
+        // switches capture instead of being captured as a filter value.
+        if let Some(next) = special_table_header(&cells) {
+            capturing = next;
+        } else {
+            match capturing {
+                // Single-column table: only the first cell is the value; any
+                // extra cells in a malformed multi-column row are intentionally
+                // ignored. A real filter/sort field name is a bare identifier
+                // (`[A-Za-z0-9_]`), so a row that isn't one - a `Note: ... |`
+                // line, a `foo:|` token - is prose: end the table and print it
+                // rather than capturing garbage. (Kiln separates its tables from
+                // prose with a blank line, so this is a belt-and-braces guard
+                // against a malformed/hand-written description.)
+                Capturing::Filters | Capturing::Sortable => {
+                    let is_filters = matches!(capturing, Capturing::Filters);
+                    let cell = cells
+                        .into_iter()
+                        .next()
+                        .expect("cells is non-empty; guarded above");
+                    if !cell.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                        // Prose - end the table and print the whole line
+                        // (link-stripped), not just the first split cell. Strip the
+                        // outer pipes/spaces first: this row qualified as a table
+                        // row so it may still carry a trailing `|`, unlike the
+                        // top-level prose path (which only fires on non-`|` rows).
+                        capturing = Capturing::Off;
+                        println!(
+                            "{}",
+                            strip_markdown_link(trimmed.trim_matches(|c| c == '|' || c == ' '))
+                        );
+                        printed = true;
+                    } else if is_filters {
+                        filters.push(cell);
+                    } else {
+                        sortable.push(cell);
+                    }
+                }
+                // Not inside a table and not a special header: a curated table
+                // row, printed verbatim.
+                Capturing::Off => {
+                    println!("{}", cells.join(" | "));
+                    printed = true;
+                }
+            }
+        }
+    }
+    if printed {
+        println!();
+    }
+    (filters, sortable)
+}
+
+/// The special single-column table a header row names, if any. Recognizing this
+/// regardless of current capture state lets two auto-generated tables sit
+/// back-to-back without a blank line and still parse correctly.
+fn special_table_header(cells: &[String]) -> Option<Capturing> {
+    match cells {
+        [header] if header.eq_ignore_ascii_case("filters") => Some(Capturing::Filters),
+        [header] if header.eq_ignore_ascii_case("sortable fields") => Some(Capturing::Sortable),
+        _ => None,
+    }
+}
+
+/// A markdown table's alignment row (every cell is only `-`/`:`, e.g.
+/// `| --- | :---: |`). Checked per cell after splitting on `|`, so a real data
+/// row is never mistaken for a separator just because it sits between pipes.
+fn is_separator_row(row: &str) -> bool {
+    let inner = row.trim_matches(|c| c == '|' || c == ' ');
+    // An otherwise-empty row (just pipes/spaces) isn't a separator.
+    if inner.is_empty() {
+        return false;
+    }
+    // A blank cell is allowed (CommonMark accepts `| --- | |`); it just isn't
+    // what disqualifies the row - only a cell with non-`-`/`:` content does.
+    inner.split('|').all(|cell| {
+        let cell = cell.trim();
+        // A non-empty separator cell needs at least one `-` (CommonMark) - an
+        // all-colons cell like `:::` is a data value, not a separator.
+        cell.is_empty() || (cell.contains('-') && cell.chars().all(|c| matches!(c, '-' | ':')))
+    })
+}
+
+/// A collection GET's `filter[...]` query params from the structured OpenAPI
+/// `parameters`, keyed by inner name (`state_include` from
+/// `filter[state_include]`). `true` = array-typed: repeat `--filter k=v` to
+/// pass multiple values; `false` = scalar. Only the params some captured
+/// example actually sent appear here, which is why it's merged with the
+/// complete-but-untyped markdown filter table rather than used alone.
+fn structured_filter_types(get_op: &Value) -> std::collections::BTreeMap<String, bool> {
+    let mut out = std::collections::BTreeMap::new();
+    let Some(params) = get_op.get("parameters").and_then(|p| p.as_array()) else {
+        return out;
+    };
+    for p in params {
+        if p.get("in").and_then(Value::as_str) != Some("query") {
+            continue;
+        }
+        let Some(inner) = p
+            .get("name")
+            .and_then(Value::as_str)
+            .and_then(|n| n.strip_prefix("filter["))
+            .and_then(|n| n.strip_suffix(']'))
+        else {
+            continue;
+        };
+        let is_array = p
+            .get("schema")
+            .and_then(|s| s.get("type"))
+            .and_then(Value::as_str)
+            == Some("array");
+        // Lowercased so keys line up with `print_query_surface`, which
+        // lowercases every filter name before looking its type up here.
+        out.insert(inner.to_ascii_lowercase(), is_array);
+    }
+    out
+}
+
+/// `[Filters](#tag/Filter)` -> `Filters`. The anchors only resolve in the API
+/// docs site, so the link syntax is noise in terminal output. Only well-formed
+/// `[label](url)` spans collapse; a bare reference like `[RFC 7231]` or an
+/// orphaned `](` is left intact, and scanning continues past it so later real
+/// links in the same string still collapse.
+fn strip_markdown_link(cell: &str) -> String {
+    let mut out = cell.to_string();
+    let mut from = 0;
+    while let Some(rel_mid) = out[from..].find("](") {
+        let mid = from + rel_mid;
+        // The nearest `[` before this `](` opens the label. None, or a label
+        // that itself contains `](` (so we'd be pairing the wrong brackets),
+        // means this `](` is orphaned - skip past it and keep scanning.
+        let Some(open) = out[from..mid].rfind('[').map(|i| from + i) else {
+            from = mid + 2;
+            continue;
+        };
+        if out[open + 1..mid].contains("](") {
+            from = mid + 2;
+            continue;
+        }
+        // Close on the first `)` after `](`; a `)` inside the label is safe
+        // since the search starts past `](`. No `)` at all: this `](` is
+        // malformed, so skip past it and keep scanning for later valid links.
+        let url_start = mid + 2;
+        let Some(rel_close) = out[url_start..].find(')') else {
+            from = url_start;
+            continue;
+        };
+        let close = url_start + rel_close;
+        let label = out[open + 1..mid].to_string();
+        out.replace_range(open..=close, &label);
+        from = open + label.len();
+    }
+    out
 }
 
 /// Most tag descriptions are just the auto-generated Filters/Sortable Fields
@@ -512,6 +595,50 @@ fn is_ordered_list_marker(l: &str) -> bool {
     }
     let after_digits = &l[digit_end..];
     after_digits.starts_with(". ") || after_digits.starts_with(") ")
+}
+
+/// Prints the mergeable query surface (filters + sortable fields) for a
+/// collection GET. Structured-first: each filter's array-vs-scalar type comes
+/// from the OpenAPI `parameters` where the spec has it (reliable typing for
+/// the `--filter k=v` bracket encoding); the complete filter/sort set comes
+/// from the markdown tables, which enumerate every scope even when no captured
+/// example exercised it. Filters the structured spec omits are still listed,
+/// just without a type.
+fn print_query_surface(get_op: &Value, md_filters: &[String], md_sortable: &[String]) {
+    let structured = structured_filter_types(get_op);
+
+    // Lowercase before deduping: markdown cells and the structured `filter[..]`
+    // parameter names are both lowercase snake_case in practice, but normalizing
+    // makes that invariant explicit so a stray `State_Include` couldn't list the
+    // same filter twice (once typed, once not).
+    let mut names: Vec<String> = md_filters
+        .iter()
+        .chain(structured.keys())
+        .map(|s| s.to_ascii_lowercase())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+
+    if !names.is_empty() {
+        println!("filters (pass with `--filter <name>=<value>`):");
+        for name in &names {
+            match structured.get(name.as_str()) {
+                Some(true) => {
+                    println!(
+                        "  {name} [array; repeat --filter {name}=<value> for multiple values]"
+                    );
+                }
+                Some(false) => println!("  {name} [scalar]"),
+                None => println!("  {name}"),
+            }
+        }
+        println!();
+    }
+
+    if !md_sortable.is_empty() {
+        println!("sortable fields (pass with `--sort <field>`, `-` prefix for descending):");
+        println!("  {}\n", md_sortable.join(", "));
+    }
 }
 
 fn operation_tag(operation: &Value) -> Option<&str> {
@@ -654,8 +781,12 @@ pub(crate) fn describe(spec: &Value, resource: &str) -> Result<(), String> {
     }
     let normalized = format!("/{bare}");
     let Some(path_obj) = spec.get("paths").and_then(|p| p.get(&normalized)) else {
+        let hint = match suggest_resources(spec, bare) {
+            candidates if candidates.is_empty() => String::new(),
+            candidates => format!(" Did you mean: {}?", candidates.join(", ")),
+        };
         return Err(format!(
-            "No resource found at path {normalized}. Run `{bin} resources` to see what's available."
+            "No resource found at path {normalized}.{hint} Run `{bin} resources` to see everything available."
         ));
     };
 
@@ -674,11 +805,15 @@ pub(crate) fn describe(spec: &Value, resource: &str) -> Result<(), String> {
 
     println!("## API reference (live, from GET /openapi)\n");
 
-    if let Some(description) = tag_description(spec, tag) {
-        println!("{}\n", description.trim());
-    } else {
-        println!("(no tag description available)\n");
-    }
+    let (md_filters, md_sortable) = match tag_description(spec, tag) {
+        Some(description) => render_tag_description(description),
+        None => {
+            println!("(no tag description available)\n");
+            (Vec::new(), Vec::new())
+        }
+    };
+
+    print_query_surface(get_op, &md_filters, &md_sortable);
 
     let attributes = data_properties(get_op)
         .and_then(|p| p.get("attributes"))
@@ -888,5 +1023,153 @@ mod tests {
                 "failed for: {skipped}"
             );
         }
+    }
+
+    #[test]
+    fn strip_markdown_link_unwraps_label_and_leaves_plain_text_alone() {
+        assert_eq!(strip_markdown_link("[Filters](#tag/Filter)"), "Filters");
+        assert_eq!(strip_markdown_link("Sortable Fields"), "Sortable Fields");
+        // Prose with several inline links - every one collapses to its label.
+        assert_eq!(
+            strip_markdown_link("see [controls](/#tag/Control) and a [vendor](/#tag/Vendor)."),
+            "see controls and a vendor."
+        );
+        // A stray `[` before a real link must not pair with the link's `](` -
+        // the reference bracket is left intact and only the real link folds.
+        assert_eq!(
+            strip_markdown_link("[RFC 7231] see [spec](url)"),
+            "[RFC 7231] see spec"
+        );
+        // A `)` inside the label doesn't terminate the target early.
+        assert_eq!(strip_markdown_link("[a) b](url)"), "a) b");
+        // Malformed link syntax (no closing paren) passes through unchanged
+        // rather than producing a mangled slice.
+        assert_eq!(strip_markdown_link("[Filters](#tag"), "[Filters](#tag");
+    }
+
+    #[test]
+    fn suggest_resources_matches_singular_input_and_prefers_short_names() {
+        let spec = serde_json::json!({
+            "paths": {
+                "/selected_controls": {},
+                "/control_templates": {},
+                "/control_template_required_policy_templates": {},
+                "/selected_controls/{id}": {},
+                "/policies": {}
+            }
+        });
+        let suggestions = suggest_resources(&spec, "control");
+        // Singular input matches; member routes excluded. `control_templates`
+        // and `selected_controls` are both 17 chars, so length ties - the
+        // prefix-match tiebreaker (`starts_with("control")`) orders the former
+        // first; the 42-char join name comes last on length alone.
+        assert_eq!(
+            suggestions,
+            vec![
+                "control_templates".to_string(),
+                "selected_controls".to_string(),
+                "control_template_required_policy_templates".to_string(),
+            ]
+        );
+        assert_eq!(suggest_resources(&spec, "zzz"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn structured_filter_types_reads_bracketed_query_params_only() {
+        let op = serde_json::json!({
+            "parameters": [
+                { "name": "Authorization", "in": "header", "schema": { "type": "string" } },
+                { "name": "filter[state_include]", "in": "query", "schema": { "type": "array" } },
+                { "name": "filter[search]", "in": "query", "schema": { "type": "string" } },
+                { "name": "sort", "in": "query", "schema": { "type": "string" } },
+                { "name": "resource_type", "in": "path", "schema": { "type": "string" } }
+            ]
+        });
+        let types = structured_filter_types(&op);
+        assert_eq!(types.get("state_include"), Some(&true));
+        assert_eq!(types.get("search"), Some(&false));
+        // Non-filter query params (sort) and non-query params are excluded.
+        assert_eq!(types.len(), 2);
+    }
+
+    #[test]
+    fn render_tag_description_captures_filter_and_sortable_tables() {
+        let text = "Some prose.\n\n\
+            | [Filters](#tag/Filter) |\n| ------ |\n| search |\nstate_include |\n\n\
+            | Sortable Fields |\n| ------ |\n| name |\ncreated_at |";
+        let (filters, sortable) = render_tag_description(text);
+        assert_eq!(filters, vec!["search", "state_include"]);
+        assert_eq!(sortable, vec!["name", "created_at"]);
+    }
+
+    #[test]
+    fn suggest_resources_does_not_flood_on_a_short_query() {
+        let spec = serde_json::json!({
+            "paths": { "/selected_controls": {}, "/policies": {}, "/vendors": {} }
+        });
+        // "s" strips to "", and "e" is a 1-char needle that does not strip -
+        // both are below the >= 2 length floor, so neither matches everything.
+        assert_eq!(suggest_resources(&spec, "s"), Vec::<String>::new());
+        assert_eq!(suggest_resources(&spec, "e"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn strip_markdown_link_keeps_scanning_past_an_orphaned_delimiter() {
+        // A stray `](` with no opening `[` is left intact, and the real link
+        // after it still collapses.
+        assert_eq!(
+            strip_markdown_link("a](b) then [real](url)"),
+            "a](b) then real"
+        );
+    }
+
+    #[test]
+    fn render_tag_description_handles_back_to_back_tables_without_blank_line() {
+        // The Sortable Fields table follows the Filters table with no blank line
+        // between them; the header must switch capture, not become a filter.
+        let text = "| Filters |\n| --- |\n| search |\n| Sortable Fields |\n| --- |\n| name |";
+        let (filters, sortable) = render_tag_description(text);
+        assert_eq!(filters, vec!["search"]);
+        assert_eq!(sortable, vec!["name"]);
+    }
+
+    #[test]
+    fn render_tag_description_rejects_non_identifier_row_inside_a_table() {
+        // A whitespace-free but non-identifier token (`foo:` has a colon) inside
+        // a Filters block isn't a field name, so it isn't captured.
+        let text = "| Filters |\n| --- |\n| search |\nfoo: |";
+        let (filters, _sortable) = render_tag_description(text);
+        assert_eq!(filters, vec!["search"]);
+    }
+
+    #[test]
+    fn render_tag_description_stops_capturing_at_spacey_prose_inside_a_table() {
+        // A pipe-terminated prose line inside a Filters block isn't a field
+        // name (it has spaces), so it ends capture instead of being captured.
+        let text = "| Filters |\n| --- |\n| search |\nNote: values must match |\nstate_include |";
+        let (filters, _sortable) = render_tag_description(text);
+        assert_eq!(filters, vec!["search"]);
+    }
+
+    #[test]
+    fn render_tag_description_treats_pipe_terminated_prose_as_prose() {
+        // A prose line that merely ends with `|`, outside any table, is not
+        // mistaken for a filter/sort row (the trailing-pipe case only counts
+        // while already capturing a table).
+        let text = "See the filter table for details |";
+        let (filters, sortable) = render_tag_description(text);
+        assert!(filters.is_empty());
+        assert!(sortable.is_empty());
+    }
+
+    #[test]
+    fn render_tag_description_prints_curated_multi_column_rows_verbatim() {
+        // A curated table (not one of the two auto-generated single-column
+        // ones) prints its rows rather than being captured or garbled, and the
+        // filter/sortable outputs stay empty.
+        let text = "| Filter | Type |\n| --- | --- |\n| search | string |";
+        let (filters, sortable) = render_tag_description(text);
+        assert!(filters.is_empty());
+        assert!(sortable.is_empty());
     }
 }

@@ -240,7 +240,7 @@ fn load_file_map() -> Result<FileFallbackMap, LoadFileMapError> {
         LoadFileMapError::Parse(format!(
             "credentials file {} could not be parsed ({e}) - remove or fix it manually, then run `{} login` again",
             path.display(),
-            crate::schema::bin_name()
+            crate::config::bin_name()
         ))
     })
 }
@@ -800,8 +800,8 @@ pub(crate) fn load(api_url: &str) -> Option<StoredToken> {
                         // whether it parses, so it's the right recovery step.
                         eprintln!(
                             "Warning: keyring entry for {api_url} could not be parsed ({e}) - treating as not logged in. Run `{} logout` then `{} login` again to recover.",
-                            crate::schema::bin_name(),
-                            crate::schema::bin_name()
+                            crate::config::bin_name(),
+                            crate::config::bin_name()
                         );
                         return None;
                     }
