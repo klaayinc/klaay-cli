@@ -68,37 +68,44 @@ bin/dev-cli --watch list selected_controls --page-size 5
 ## Auth
 
 ```
+klaay login
+```
+
+Opens your browser at the Klaay login page — sign in with whatever method
+your deployment supports (password, Google, Microsoft), approve the CLI on
+the consent screen (it shows the same verification code the terminal
+printed), and the CLI picks up its token automatically. No OAuth client
+registration or provider configuration needed; the handoff goes through the
+server, so it works even when the browser runs on a different machine than
+the CLI. Prefer the terminal instead:
+
+```
 klaay login --email you@company.com
 ```
 
 Prompts for your password (or pass `--password`). If you belong to more than
 one Klaay account, you'll be shown the list and prompted to pick one — or
-pass `--account <id>` upfront if you already know it. SSO is also supported:
+pass `--account <id>` upfront if you already know it.
+
+For CI, or an SSH session where no browser can complete the handoff, pipe an
+already-minted token in:
 
 ```
-klaay login --google        # opens your browser
-klaay login --microsoft     # prints a device code to enter at microsoft.com/devicelogin
+klaay login --with-token < token.txt
 ```
-
-SSO needs `GOOGLE_AUTH_CLI_CLIENT_ID` / `MICROSOFT_AUTH_CLI_CLIENT_ID` (and
-optionally `MICROSOFT_AUTH_CLI_TENANT`) set to a CLI-specific OAuth client —
-Klaay's existing web-app OAuth clients can't do a CLI-style redirect or
-device-code flow. These must match the same-named env vars on the server
-exactly, since both sides need to agree on the same registered client id.
-Until those are registered (see the plan), `--google`/`--microsoft` fail with
-a clear message rather than a confusing network error.
 
 `klaay whoami` shows who you're logged in as; `klaay logout` clears the
 stored session.
 
-Point at a non-default environment (e.g. local dev) with `--api-url` or the
-`KLAAY_API_URL` env var — the default is `https://api.klaay.com`.
+Point at a non-default environment (e.g. local dev) with `--api-url` /
+`KLAAY_API_URL` (default `https://api.klaay.com`) and, for the browser flow,
+`--web-url` / `KLAAY_WEB_URL` (default `https://app.klaay.com`).
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `klaay login` | Authenticate and store a token (password or `--google`/`--microsoft`) |
+| `klaay login` | Authenticate and store a token (browser sign-in, `--email`, or `--with-token`) |
 | `klaay logout` | Clear the stored token |
 | `klaay whoami` | Show the current session (calls `GET /me`) |
 | `klaay resources` | List every resource type, derived from `GET /openapi` |

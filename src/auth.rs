@@ -28,24 +28,17 @@ fn decode_jwt_payload(token: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// The three credential variants that carry a plaintext secret directly in
-/// the /authenticate request body (password, or one of the two SSO
-/// providers' verified ID tokens - see authenticate_controller.rb). Split
-/// out from `Credentials` (rather than one flat enum with an `Upgrade` arm
-/// alongside these) specifically so `build_secret_auth_body` - which only
-/// ever handles this subset - can express that as its parameter type. That
-/// makes "called with Upgrade" a compile error instead of a `unreachable!()`
-/// runtime assertion that a future refactor could silently invalidate.
+/// The credential variants that carry a plaintext secret directly in the
+/// /authenticate request body. Split out from `Credentials` (rather than one
+/// flat enum with an `Upgrade` arm alongside these) specifically so
+/// `build_secret_auth_body` - which only ever handles this subset - can
+/// express that as its parameter type. That makes "called with Upgrade" a
+/// compile error instead of a `unreachable!()` runtime assertion that a
+/// future refactor could silently invalidate.
 enum SecretCredentials {
     Password {
         email: zeroize::Zeroizing<String>,
         password: zeroize::Zeroizing<String>,
-    },
-    Google {
-        id_token: zeroize::Zeroizing<String>,
-    },
-    Microsoft {
-        id_token: zeroize::Zeroizing<String>,
     },
 }
 
@@ -93,12 +86,8 @@ fn build_secret_auth_body(
     // rather than an invariant that would need re-checking by hand if a
     // future `SecretCredentials` variant were added inline.
     const PASSWORD_KEY: &str = "password";
-    const GOOGLE_KEY: &str = "google_credentials";
-    const MICROSOFT_KEY: &str = "microsoft_credentials";
     let (field_name, secret) = match credentials {
         SecretCredentials::Password { password, .. } => (PASSWORD_KEY, password.as_str()),
-        SecretCredentials::Google { id_token } => (GOOGLE_KEY, id_token.as_str()),
-        SecretCredentials::Microsoft { id_token } => (MICROSOFT_KEY, id_token.as_str()),
     };
     // `Zeroizing<String>` from the moment it's created, not a plain `String`
     // only zeroized explicitly further down - the explicit
@@ -116,14 +105,13 @@ fn build_secret_auth_body(
     // this function would otherwise leave the JSON-encoded email sitting in
     // an unzeroized heap allocation, the same gap this function already
     // takes care to close for the secret itself.
-    let email_json: Option<zeroize::Zeroizing<String>> =
-        if let SecretCredentials::Password { email, .. } = credentials {
-            Some(zeroize::Zeroizing::new(
-                serde_json::to_string(email).expect("a string always serializes to JSON"),
-            ))
-        } else {
-            None
-        };
+    // Password is the only secret-credential variant left (the SSO variants
+    // moved to the browser flow), so this destructure is total and the email
+    // is always present - no Option needed.
+    let SecretCredentials::Password { email, .. } = credentials;
+    let mut email_json: zeroize::Zeroizing<String> = zeroize::Zeroizing::new(
+        serde_json::to_string(email).expect("a string always serializes to JSON"),
+    );
     // `Zeroizing<String>`, matching `email_json`/`secret_json` above - an
     // account id isn't as sensitive as a password/email, but this function
     // otherwise treats every JSON-encoded field the same way (see the
@@ -172,9 +160,10 @@ fn build_secret_auth_body(
     // which `secret_json`'s own zeroize call below can't reach since it only
     // ever held a copy of that buffer, not the buffer itself.
     let capacity = PREFIX.len()
-        + email_json.as_ref().map_or(0, |e| {
-            KEY_PREFIX.len() + EMAIL_KEY.len() + KEY_SUFFIX.len() + e.len()
-        })
+        + KEY_PREFIX.len()
+        + EMAIL_KEY.len()
+        + KEY_SUFFIX.len()
+        + email_json.len()
         + KEY_PREFIX.len()
         + field_name.len()
         + KEY_SUFFIX.len()
@@ -195,12 +184,10 @@ fn build_secret_auth_body(
     let mut json: zeroize::Zeroizing<String> =
         zeroize::Zeroizing::new(String::with_capacity(capacity));
     json.push_str(PREFIX);
-    if let Some(email_json) = &email_json {
-        json.push_str(KEY_PREFIX);
-        json.push_str(EMAIL_KEY);
-        json.push_str(KEY_SUFFIX);
-        json.push_str(email_json);
-    }
+    json.push_str(KEY_PREFIX);
+    json.push_str(EMAIL_KEY);
+    json.push_str(KEY_SUFFIX);
+    json.push_str(&email_json);
     json.push_str(KEY_PREFIX);
     json.push_str(field_name);
     json.push_str(KEY_SUFFIX);
@@ -226,9 +213,7 @@ fn build_secret_auth_body(
     // this function's existing security model rather than only applying it
     // to one of the three sensitive values built here.
     zeroize::Zeroize::zeroize(&mut secret_json);
-    if let Some(mut email_json) = email_json {
-        zeroize::Zeroize::zeroize(&mut email_json);
-    }
+    zeroize::Zeroize::zeroize(&mut email_json);
     if let Some(mut id_json) = id_json {
         zeroize::Zeroize::zeroize(&mut id_json);
     }
@@ -626,30 +611,6 @@ pub(crate) fn login(
     );
 }
 
-/// The two SSO providers `sso.rs` can produce an id token for. An enum here
-/// (rather than `login_with_id_token` taking a raw `&str`, matched against
-/// literal `"google"`/`"microsoft"`) makes a typo at a call site a compile
-/// error instead of a `process::exit` at runtime - `SecretCredentials`
-/// already expresses these same two variants, this just gives the choice
-/// between them its own type before the id token is attached.
-pub(crate) enum SsoProvider {
-    Google,
-    Microsoft,
-}
-
-pub(crate) fn login_with_id_token(
-    config: &Config,
-    provider: SsoProvider,
-    id_token: zeroize::Zeroizing<String>,
-    account: Option<String>,
-) {
-    let credentials = match provider {
-        SsoProvider::Google => Credentials::Secret(SecretCredentials::Google { id_token }),
-        SsoProvider::Microsoft => Credentials::Secret(SecretCredentials::Microsoft { id_token }),
-    };
-    login_with_credentials(config, credentials, account);
-}
-
 fn login_with_credentials(config: &Config, credentials: Credentials, account: Option<String>) {
     let response = post_authenticate(config, &credentials, account.as_deref());
     // `is_success()` (which also accounts for an unparseable 2xx body), not
@@ -842,14 +803,20 @@ fn login_with_credentials(config: &Config, credentials: Credentials, account: Op
         (None, None) => println!("Logged in as {email_display}"),
     }
 
-    if let Err(e) = token_store::save(&StoredToken {
+    save_or_warn(&StoredToken {
         // Already Zeroizing<String> from require_token (both branches above
         // produce it directly - no separate wrap needed here anymore).
         token: final_token,
         api_url: config.api_url().to_string(),
         account_id: resolved_account_id,
         email,
-    }) {
+    });
+}
+
+/// Stores the token, downgrading a storage failure to a warning: the login
+/// itself succeeded either way, the user just won't stay logged in.
+fn save_or_warn(stored: &StoredToken) {
+    if let Err(e) = token_store::save(stored) {
         // `CorruptedFile` gets its own message rather than the generic one
         // below - the underlying credentials file is intact but unreadable,
         // and (per `save_to_file`'s own reasoning) was deliberately left
@@ -1005,6 +972,113 @@ fn sub_day_magnitude(abs_seconds: u64) -> SubDayMagnitude {
     }
 }
 
+/// JWT shape check shared by `require_login` (stored tokens) and
+/// `login_with_token` (tokens arriving from the sign-in mailbox or stdin):
+/// base64url charset and exactly three non-empty dot-separated segments.
+/// Anything else is corrupted or not a JWT, and would otherwise reach ureq's
+/// header API verbatim inside the `Authorization` value.
+fn token_shape_ok(token: &str) -> bool {
+    let parts: Vec<&str> = token.split('.').collect();
+    token
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && parts.len() == 3
+        && parts.iter().all(|p| !p.is_empty())
+}
+
+/// Kiln ids serialize as JSON numbers, but tolerate strings too rather than
+/// silently dropping an id a future serializer renders differently.
+fn json_id_string(v: &Value) -> Option<String> {
+    v.as_u64()
+        .map(|n| n.to_string())
+        .or_else(|| v.as_str().map(|s| s.to_string()))
+}
+
+/// Completes a login with an already-minted token - from the browser
+/// sign-in mailbox (web_login.rs) or `--with-token`. Verifies it against
+/// the live API via GET /me before storing, which also confirms the token
+/// actually belongs to *this* `--api-url` (a mailbox token minted by one
+/// deployment is useless against another).
+pub(crate) fn login_with_token(config: &Config, mut token: zeroize::Zeroizing<String>) {
+    if !token_shape_ok(&token) {
+        eprintln!("That value doesn't look like a Klaay API token.");
+        // Owned here, so zeroize the real buffer before the no-unwind exit.
+        zeroize::Zeroize::zeroize(&mut *token);
+        std::process::exit(1);
+    }
+    let client = ApiClient::new(config.api_url().to_string(), Some(token.clone()));
+    let response = client.call(HttpMethod::Get, "/me", None);
+    if !response.is_success() {
+        eprintln!(
+            "The token was not accepted by {} ({}): {}",
+            config.api_url(),
+            response.status,
+            response.error_detail()
+        );
+        std::process::exit(1);
+    }
+    let attributes = response
+        .body()
+        .and_then(|b| b.get("data"))
+        .and_then(|d| d.get("attributes"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let email = attributes
+        .get("email")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let claims = decode_jwt_payload(&token);
+    // /me's current_account_id reflects what the server resolved for this
+    // token; the JWT claim is the fallback if the response omits it.
+    let account_id = attributes
+        .get("current_account_id")
+        .and_then(json_id_string)
+        .or_else(|| claims.get("account_id").and_then(json_id_string));
+    let exp = claims.get("exp").and_then(|v| v.as_i64());
+
+    let email_display = email.as_deref().unwrap_or("(unknown email)");
+    match exp {
+        Some(exp) => println!(
+            "Logged in as {email_display}\nToken stored (expires {})",
+            format_timestamp(exp)
+        ),
+        None => println!("Logged in as {email_display}"),
+    }
+    save_or_warn(&StoredToken {
+        token,
+        api_url: config.api_url().to_string(),
+        account_id,
+        email,
+    });
+}
+
+/// `--with-token`: reads a token from stdin - the fallback when the browser
+/// flow can't reach this machine (e.g. over SSH), and the natural path for
+/// CI. Echo-off when interactive, plain line read when piped.
+pub(crate) fn login_with_stdin_token(config: &Config) {
+    use std::io::IsTerminal;
+    let token = if std::io::stdin().is_terminal() {
+        zeroize::Zeroizing::new(rpassword::prompt_password("Token: ").unwrap_or_else(|e| {
+            eprintln!("Could not read token: {e}");
+            std::process::exit(1);
+        }))
+    } else {
+        let mut line = zeroize::Zeroizing::new(String::new());
+        if let Err(e) = std::io::stdin().read_line(&mut line) {
+            eprintln!("Could not read token from stdin: {e}");
+            std::process::exit(1);
+        }
+        // The trimmed copy becomes the protected token; `line` (which may
+        // still carry the trailing newline) zeroizes on drop.
+        zeroize::Zeroizing::new(line.trim().to_string())
+    };
+    if token.is_empty() {
+        eprintln!("Token cannot be empty.");
+        std::process::exit(1);
+    }
+    login_with_token(config, token);
+}
+
 pub(crate) fn whoami(config: &Config) {
     let stored = require_login(config);
     // A real Zeroizing clone (not a plain-String .to_string() copy) - stored
@@ -1092,28 +1166,7 @@ pub(crate) fn require_login(config: &Config) -> StoredToken {
     // through unchanged - splitting on '.' produces exactly 3 substrings for
     // those too, just with one or two of them empty. Rejecting any empty
     // segment closes that gap without weakening the check above.
-    // Scoped into its own block, rather than sharing the enclosing scope
-    // with the `zeroize::Zeroize::zeroize(&mut stored)` call below -
-    // `token_parts` borrows `stored.token`, and NLL already proves that
-    // borrow dead before the mutable borrow zeroize takes (it's last read
-    // in this very condition), so this block doesn't change what compiles.
-    // What it does change: a future diagnostic (e.g. an `eprintln!` printing
-    // a `token_parts` element) added inside the `if` body below could no
-    // longer accidentally read from `stored.token` after it's been zeroized
-    // - the borrow's lifetime is now bounded by this block, not by "wherever
-    // `token_parts` happens to last be read", so the safe ordering is
-    // enforced structurally instead of resting on NLL reasoning a future
-    // edit could quietly invalidate.
-    let token_is_valid = {
-        let token_parts: Vec<&str> = stored.token.split('.').collect();
-        stored
-            .token
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-            && token_parts.len() == 3
-            && token_parts.iter().all(|p| !p.is_empty())
-    };
-    if !token_is_valid {
+    if !token_shape_ok(&stored.token) {
         eprintln!("Stored token is invalid - run `klaay login` again.");
         // Zeroizes the whole struct (it derives `Zeroize`), not just
         // `stored.token` - `api_url`/`account_id`/`email` aren't secrets on
@@ -1175,37 +1228,6 @@ mod tests {
         assert_eq!(
             parsed["data"]["relationships"]["account"]["data"]["id"].as_str(),
             Some("42")
-        );
-    }
-
-    #[test]
-    fn google_id_token_auth_body_is_valid_json() {
-        let credentials = SecretCredentials::Google {
-            id_token: zeroize::Zeroizing::new("some.jwt.token".to_string()),
-        };
-        let bytes = build_secret_auth_body(&credentials, None);
-        let parsed: Value = serde_json::from_slice(&bytes).expect("must be valid JSON");
-        assert_eq!(
-            parsed["data"]["attributes"]["google_credentials"].as_str(),
-            Some("some.jwt.token")
-        );
-        assert!(parsed["data"]["attributes"].get("email").is_none());
-    }
-
-    #[test]
-    fn microsoft_id_token_auth_body_is_valid_json() {
-        let credentials = SecretCredentials::Microsoft {
-            id_token: zeroize::Zeroizing::new("some.jwt.token".to_string()),
-        };
-        let bytes = build_secret_auth_body(&credentials, Some("7"));
-        let parsed: Value = serde_json::from_slice(&bytes).expect("must be valid JSON");
-        assert_eq!(
-            parsed["data"]["attributes"]["microsoft_credentials"].as_str(),
-            Some("some.jwt.token")
-        );
-        assert_eq!(
-            parsed["data"]["relationships"]["account"]["data"]["id"].as_str(),
-            Some("7")
         );
     }
 }

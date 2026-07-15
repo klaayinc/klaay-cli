@@ -4,9 +4,9 @@ mod config;
 mod format;
 mod schema;
 mod skills;
-mod sso;
 mod token_store;
 mod upload;
+mod web_login;
 
 use clap::{Parser, Subcommand};
 use client::{ApiClient, HttpMethod, ListParams};
@@ -46,6 +46,13 @@ fn api_url_help() -> String {
     )
 }
 
+fn web_url_help() -> String {
+    format!(
+        "Override the web app URL the browser sign-in opens (defaults to {}, or the KLAAY_WEB_URL env var if set).",
+        config::DEFAULT_WEB_URL
+    )
+}
+
 #[derive(Parser)]
 #[command(
     name = "klaay",
@@ -66,6 +73,10 @@ struct Cli {
     #[arg(long, global = true, help = api_url_help())]
     api_url: Option<String>,
 
+    // Same runtime-help pattern as --api-url above, same reason.
+    #[arg(long, global = true, help = web_url_help())]
+    web_url: Option<String>,
+
     /// Allow --api-url to point at a non-loopback, non-HTTPS host, sending
     /// credentials/SSO tokens in plain text (also settable via
     /// KLAAY_ALLOW_INSECURE=1/true/yes). Off by default: without this, such
@@ -80,22 +91,29 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Log in with email/password (or --google / --microsoft for SSO) and store a token.
-    #[command(after_help = "Example: klaay login --email dev@customer.com")]
+    /// Log in and store a token. With no flags, opens your browser at the
+    /// Klaay login page (any sign-in method works there); --email switches
+    /// to the email/password prompt.
+    #[command(
+        after_help = "Examples: klaay login  |  klaay login --email dev@customer.com  |  klaay login --with-token < token.txt"
+    )]
     Login {
         #[arg(long)]
         email: Option<String>,
         /// Insecure: prefer the interactive prompt - a value passed here can
         /// end up in shell history, `ps` output, or system audit logs.
-        #[arg(long)]
+        #[arg(long, requires = "email")]
         password: Option<String>,
-        /// Account id, if already known - skips the multi-account prompt.
-        #[arg(long)]
+        /// Account id, if already known - skips the multi-account prompt
+        /// (email/password flow only; the browser flow uses the account your
+        /// web session selects).
+        #[arg(long, requires = "email")]
         account: Option<String>,
-        #[arg(long, conflicts_with = "microsoft")]
-        google: bool,
-        #[arg(long, conflicts_with = "google")]
-        microsoft: bool,
+        /// Read an already-minted token from stdin instead of signing in -
+        /// for SSH sessions and CI, where the browser flow can't reach this
+        /// machine.
+        #[arg(long, conflicts_with_all = ["email", "password", "account"])]
+        with_token: bool,
     },
     /// Clear the stored token.
     Logout,
@@ -300,63 +318,40 @@ fn parse_fields_arg(fields: Option<&str>) -> Option<(String, String)> {
 
 fn main() {
     let cli = Cli::parse();
-    let config = Config::resolve(cli.api_url, cli.force_insecure).unwrap_or_else(|e| {
-        eprintln!("Error: {e}");
-        std::process::exit(1);
-    });
+    let config =
+        Config::resolve(cli.api_url, cli.web_url, cli.force_insecure).unwrap_or_else(|e| {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        });
 
     match cli.command {
         Commands::Login {
             email,
             password,
             account,
-            google,
-            microsoft,
+            with_token,
         } => {
             // Wrapped immediately at the destructure site rather than left
-            // as a plain `Option<String>` until `auth::login` wraps it -
-            // otherwise the value sits unprotected in this local for the
-            // guard check and SSO branches below, even on the paths that
-            // never use it. This protects the *entire* lifetime of the
-            // string's one heap allocation, not just "going forward from
-            // here" - confirmed empirically (checking the pointer at each
-            // step) that clap's parsed `String`, this match arm's
-            // destructured `password: Option<String>` binding, and the
-            // final `Zeroizing<String>` all point at the exact same
-            // allocation. Rust's move semantics for owned heap types never
-            // clone the backing buffer on a move (only the (ptr, len, cap)
-            // header moves) - there is no separate, earlier copy left
-            // behind unprotected inside the `Commands::Login` variant.
+            // as a plain `Option<String>` until `auth::login` wraps it - this
+            // protects the entire lifetime of the string's one heap
+            // allocation (moves never clone the backing buffer), covering
+            // the branch checks below too.
             let password = password.map(zeroize::Zeroizing::new);
-            // Same reasoning as `password` above - the email address is PII,
-            // and wrapping it here (rather than inside `auth::login`) covers
-            // the guard check and SSO branches below too, not just the path
-            // that eventually reaches `auth::login`.
+            // Same reasoning as `password` above - the email address is PII.
             let email = email.map(zeroize::Zeroizing::new);
-            // ACCEPTED GAP, same as `post_authenticate`'s: the
-            // `process::exit(1)` below bypasses `Zeroizing`'s zeroing
-            // `Drop` for `password` the same way every other exit-on-error
-            // path in this crate does. The window is already as tight as
-            // it can be - `password` is wrapped in `Zeroizing` immediately
-            // above (not left as a plain `String` until this guard passes),
-            // and this guard check is the very next thing that runs, before
-            // any other fallible call. A future edit to this arm that adds
-            // another fallible helper call between this guard and
-            // `auth::login`/`sso::login_*` below would widen this window -
-            // keep `password` passed into whichever branch runs as early as
-            // possible if that happens.
-            if (google || microsoft) && (email.is_some() || password.is_some()) {
-                eprintln!(
-                    "Error: --email/--password cannot be combined with --google/--microsoft."
-                );
-                std::process::exit(1);
-            }
-            if google {
-                sso::login_google(&config, account);
-            } else if microsoft {
-                sso::login_microsoft(&config, account);
-            } else {
+            if with_token {
+                auth::login_with_stdin_token(&config);
+            // No `|| password.is_some()` arm: clap's `requires = "email"`
+            // on --password makes a password-without-email invocation a
+            // parse error before this code runs.
+            } else if email.is_some() {
                 auth::login(&config, email, password, account);
+            } else {
+                // The default: borrow the web app's login page (every sign-in
+                // method the deployment supports) via the server-side nonce
+                // mailbox. clap's `requires`/`conflicts_with_all` rules above
+                // guarantee `account` is None on this branch.
+                web_login::login_via_browser(&config);
             }
         }
         Commands::Logout => auth::logout(&config),

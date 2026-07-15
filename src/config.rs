@@ -6,6 +6,10 @@ use std::path::PathBuf;
 // literals) so the two can never silently drift apart the way a second,
 // independently-typed literal would.
 pub(crate) const DEFAULT_API_URL: &str = "https://api.klaay.com";
+// The web app origin hosting the login page the browser sign-in flow opens
+// (see web_login.rs). Matches kiln's own default for its SPA origin
+// (config/initializers/cors.rb).
+pub(crate) const DEFAULT_WEB_URL: &str = "https://app.klaay.com";
 
 /// The invoked binary's own name, for "run `<this> ...`" hints. Lives here (a
 /// foundational module) rather than in `schema`/`client` so any layer can use
@@ -38,6 +42,9 @@ pub(crate) struct Config {
     // observes the normalized, already-`enforce_secure`-checked form
     // rather than a mutated one that bypassed both.
     api_url: String,
+    // The web app origin for browser sign-in; resolved and normalized the
+    // same way as `api_url`.
+    web_url: String,
     // Stored (not just consumed locally by `enforce_secure`) so other
     // insecure-transport decisions - e.g. upload.rs's plaintext-upload-URL
     // check - can reuse the same opt-in instead of inventing a second,
@@ -59,6 +66,7 @@ impl Config {
     /// integration-testable rather than only its extracted pure helpers.
     pub(crate) fn resolve(
         api_url_flag: Option<String>,
+        web_url_flag: Option<String>,
         force_insecure: bool,
     ) -> Result<Self, String> {
         let api_url = api_url_flag
@@ -96,6 +104,21 @@ impl Config {
         // com///` is normalized down to `https://api.example.com` the same
         // way, with no separate warning for the unusual multi-slash input.
         let api_url = api_url.trim_end_matches('/').to_string();
+        // Same flag -> env -> default resolution and normalization as
+        // `api_url` above; the browser sign-in URL is built from this.
+        let web_url = web_url_flag
+            .or_else(|| match std::env::var("KLAAY_WEB_URL") {
+                Ok(v) => Some(v),
+                Err(std::env::VarError::NotPresent) => None,
+                Err(std::env::VarError::NotUnicode(v)) => {
+                    eprintln!(
+                        "Warning: KLAAY_WEB_URL contains non-UTF-8 bytes ({v:?}) - ignoring it and using the default ({DEFAULT_WEB_URL})."
+                    );
+                    None
+                }
+            })
+            .unwrap_or_else(|| DEFAULT_WEB_URL.to_string());
+        let web_url = web_url.trim_end_matches('/').to_string();
         // Either the flag or the env var opts in - a script/CI pipeline that
         // can't easily pass a flag can still set the env var, same pattern
         // as KLAAY_API_URL above. Checked against a specific truthy value,
@@ -184,15 +207,29 @@ impl Config {
                 allow_insecure_env_lower.as_deref(),
                 Some("1" | "true" | "yes")
             );
-        enforce_secure(&api_url, effective_force_insecure)?;
+        // Each URL's failure names the flag/env pair it came from - the two
+        // share one classifier, and without the label a bad --web-url would
+        // print a message indistinguishable from a bad --api-url.
+        enforce_secure(&api_url, effective_force_insecure)
+            .map_err(|e| format!("--api-url / KLAAY_API_URL: {e}"))?;
+        // The web URL opens in a browser rather than carrying credentials
+        // from this process, but a plaintext non-loopback login page is the
+        // same class of mistake - hold it to the same standard.
+        enforce_secure(&web_url, effective_force_insecure)
+            .map_err(|e| format!("--web-url / KLAAY_WEB_URL: {e}"))?;
         Ok(Config {
             api_url,
+            web_url,
             force_insecure: effective_force_insecure,
         })
     }
 
     pub(crate) fn api_url(&self) -> &str {
         &self.api_url
+    }
+
+    pub(crate) fn web_url(&self) -> &str {
+        &self.web_url
     }
 
     /// Whether the user opted into insecure (non-HTTPS, non-loopback)
@@ -260,7 +297,7 @@ fn classify_api_url(api_url: &str) -> UrlVerdict {
         // unreachable/untested defensive code.
         "http" if is_loopback_host(parsed.host()) => UrlVerdict::Safe,
         "http" => UrlVerdict::PlaintextRisk(format!(
-            "{api_url} is not HTTPS - your credentials or SSO token would be sent to it in plain text."
+            "{api_url} is not HTTPS - sign-in credentials would travel to it in plain text."
         )),
         // `UrlProblem`, not `PlaintextRisk` - a `PlaintextRisk` verdict
         // implies `--force-insecure`/`KLAAY_ALLOW_INSECURE` can make the URL
@@ -275,7 +312,7 @@ fn classify_api_url(api_url: &str) -> UrlVerdict {
         // `UrlProblem`: every non-http(s) scheme is equally unusable here,
         // regardless of whether it implies real network transport.
         other => UrlVerdict::UrlProblem(format!(
-            "{api_url} uses the \"{other}\" scheme - only http and https are supported as API endpoint URLs."
+            "{api_url} uses the \"{other}\" scheme - only http and https are supported."
         )),
     }
 }
@@ -550,47 +587,149 @@ mod tests {
     #[test]
     #[serial_test::serial(config_env_vars)]
     fn resolve_accepts_a_safe_https_url() {
-        temp_env::with_var("KLAAY_ALLOW_INSECURE", None::<&str>, || {
-            let config = Config::resolve(Some("https://api.klaay.com".to_string()), false)
-                .expect("an https URL should resolve without error");
-            assert_eq!(config.api_url(), "https://api.klaay.com");
-        });
+        temp_env::with_vars(
+            [
+                ("KLAAY_ALLOW_INSECURE", None::<&str>),
+                ("KLAAY_WEB_URL", None::<&str>),
+            ],
+            || {
+                let config =
+                    Config::resolve(Some("https://api.klaay.com".to_string()), None, false)
+                        .expect("an https URL should resolve without error");
+                assert_eq!(config.api_url(), "https://api.klaay.com");
+            },
+        );
     }
 
     #[test]
     #[serial_test::serial(config_env_vars)]
     fn resolve_rejects_an_unparseable_url_regardless_of_force_insecure() {
-        temp_env::with_var("KLAAY_ALLOW_INSECURE", None::<&str>, || {
-            // `UrlProblem`, not `PlaintextRisk` - a URL that can never
-            // produce a working request must fail fast even with
-            // `--force-insecure`, which only exists to unblock a genuine
-            // plaintext-transport tradeoff, not a structurally broken URL.
-            assert!(Config::resolve(Some("not a valid url".to_string()), true).is_err());
-        });
+        temp_env::with_vars(
+            [
+                ("KLAAY_ALLOW_INSECURE", None::<&str>),
+                ("KLAAY_WEB_URL", None::<&str>),
+            ],
+            || {
+                // `UrlProblem`, not `PlaintextRisk` - a URL that can never
+                // produce a working request must fail fast even with
+                // `--force-insecure`, which only exists to unblock a genuine
+                // plaintext-transport tradeoff, not a structurally broken URL.
+                assert!(Config::resolve(Some("not a valid url".to_string()), None, true).is_err());
+            },
+        );
     }
 
     #[test]
     #[serial_test::serial(config_env_vars)]
     fn resolve_rejects_a_non_http_scheme_regardless_of_force_insecure() {
-        temp_env::with_var("KLAAY_ALLOW_INSECURE", None::<&str>, || {
-            assert!(Config::resolve(Some("ftp://api.klaay.com".to_string()), true).is_err());
-        });
+        temp_env::with_vars(
+            [
+                ("KLAAY_ALLOW_INSECURE", None::<&str>),
+                ("KLAAY_WEB_URL", None::<&str>),
+            ],
+            || {
+                assert!(
+                    Config::resolve(Some("ftp://api.klaay.com".to_string()), None, true).is_err()
+                );
+            },
+        );
     }
 
     #[test]
     #[serial_test::serial(config_env_vars)]
     fn resolve_rejects_a_plaintext_url_without_force_insecure() {
-        temp_env::with_var("KLAAY_ALLOW_INSECURE", None::<&str>, || {
-            assert!(Config::resolve(Some("http://example.com".to_string()), false).is_err());
-        });
+        temp_env::with_vars(
+            [
+                ("KLAAY_ALLOW_INSECURE", None::<&str>),
+                ("KLAAY_WEB_URL", None::<&str>),
+            ],
+            || {
+                assert!(
+                    Config::resolve(Some("http://example.com".to_string()), None, false).is_err()
+                );
+            },
+        );
     }
 
     #[test]
     #[serial_test::serial(config_env_vars)]
     fn resolve_accepts_a_plaintext_url_with_force_insecure() {
-        temp_env::with_var("KLAAY_ALLOW_INSECURE", None::<&str>, || {
-            assert!(Config::resolve(Some("http://example.com".to_string()), true).is_ok());
-        });
+        temp_env::with_vars(
+            [
+                ("KLAAY_ALLOW_INSECURE", None::<&str>),
+                ("KLAAY_WEB_URL", None::<&str>),
+            ],
+            || {
+                assert!(
+                    Config::resolve(Some("http://example.com".to_string()), None, true).is_ok()
+                );
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(config_env_vars)]
+    fn resolve_defaults_web_url_and_normalizes_a_flag_override() {
+        temp_env::with_vars(
+            [
+                ("KLAAY_ALLOW_INSECURE", None::<&str>),
+                ("KLAAY_WEB_URL", None::<&str>),
+            ],
+            || {
+                let config =
+                    Config::resolve(Some("https://api.klaay.com".to_string()), None, false)
+                        .expect("resolves");
+                assert_eq!(config.web_url(), DEFAULT_WEB_URL);
+
+                let config = Config::resolve(
+                    Some("https://api.klaay.com".to_string()),
+                    Some("https://web.example.com///".to_string()),
+                    false,
+                )
+                .expect("resolves");
+                assert_eq!(config.web_url(), "https://web.example.com");
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(config_env_vars)]
+    fn resolve_falls_back_to_klaay_web_url_env_var_when_flag_is_none() {
+        temp_env::with_vars(
+            [
+                ("KLAAY_ALLOW_INSECURE", None::<&str>),
+                ("KLAAY_WEB_URL", Some("https://web.env.example.com/")),
+            ],
+            || {
+                let config =
+                    Config::resolve(Some("https://api.klaay.com".to_string()), None, false)
+                        .expect("resolves");
+                assert_eq!(config.web_url(), "https://web.env.example.com");
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(config_env_vars)]
+    fn resolve_rejects_a_plaintext_web_url_and_names_the_web_flag() {
+        temp_env::with_vars(
+            [
+                ("KLAAY_ALLOW_INSECURE", None::<&str>),
+                ("KLAAY_WEB_URL", None::<&str>),
+            ],
+            || {
+                let err = Config::resolve(
+                    Some("https://api.klaay.com".to_string()),
+                    Some("http://web.example.com".to_string()),
+                    false,
+                )
+                .expect_err("plaintext web url must be rejected");
+                assert!(
+                    err.contains("--web-url"),
+                    "error should name the web flag: {err}"
+                );
+            },
+        );
     }
 
     #[test]
@@ -608,9 +747,10 @@ mod tests {
             [
                 ("KLAAY_API_URL", Some("https://from-env.example.com")),
                 ("KLAAY_ALLOW_INSECURE", None),
+                ("KLAAY_WEB_URL", None),
             ],
             || {
-                let result = Config::resolve(None, false);
+                let result = Config::resolve(None, None, false);
                 assert_eq!(
                     result
                         .expect("a safe https URL from the env var should resolve")
@@ -636,10 +776,11 @@ mod tests {
             [
                 ("KLAAY_ALLOW_INSECURE", Some("true")),
                 ("KLAAY_API_URL", None),
+                ("KLAAY_WEB_URL", None),
             ],
             || {
                 // No `--force-insecure` flag (`false`) - only the env var opts in.
-                let result = Config::resolve(Some("http://example.com".to_string()), false);
+                let result = Config::resolve(Some("http://example.com".to_string()), None, false);
                 assert!(result.is_ok());
             },
         );
@@ -657,9 +798,10 @@ mod tests {
             [
                 ("KLAAY_ALLOW_INSECURE", Some("on")),
                 ("KLAAY_API_URL", None),
+                ("KLAAY_WEB_URL", None),
             ],
             || {
-                let result = Config::resolve(Some("http://example.com".to_string()), false);
+                let result = Config::resolve(Some("http://example.com".to_string()), None, false);
                 assert!(result.is_err());
             },
         );

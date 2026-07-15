@@ -12,7 +12,7 @@ license-file = "LICENSE"
 # nothing stops an accidental `cargo publish` from actually uploading it.
 publish = false
 # The highest MSRV among our own direct dependencies (keyring 4.1.4 requires
-# 1.88.0; ureq/clap need 1.85, oauth2 needs 1.65) - verified against each
+# 1.88.0; ureq/clap need 1.85) - verified against each
 # dependency's own Cargo.toml rather than assumed.
 rust-version = "1.88"
 description = "Command-line client for the Klaay API"
@@ -51,20 +51,13 @@ serde_json = "1"
 # against these at build time. No CI job builds this crate yet; whichever one
 # does will need these packages in its Linux runner setup.
 keyring = "4.1.4"
-# No default features: oauth2's defaults (and its "reqwest-blocking" feature)
-# pull in reqwest as a second HTTP client stack alongside ureq. Instead we
-# implement oauth2's generic SyncHttpClient trait ourselves against our own
-# ureq agent (see sso.rs) - one HTTP client for the whole binary.
-#
-# "5.0", not a bare "5" - floored at the version actually resolved and tested
-# here (matching how keyring/zeroize are floored above), rather than letting
-# a lockfile-free build silently resolve to a future 5.x that changes the
-# SyncHttpClient trait signature sso.rs implements by hand, producing a
-# confusing trait-mismatch compile error far from this file.
-oauth2 = { version = "5.0", default-features = false }
-# Declared directly (not just relied on transitively through oauth2's
-# re-export) so the version contract is explicit - resolves to the same
-# 2.5.8 already pulled in by oauth2, no conflict.
+# Sole source of randomness: the browser sign-in's single-use mailbox nonce
+# (web_login.rs). The OS CSPRNG via the same primitive the higher-level rand
+# stack builds on, without pulling that whole stack in for one 16-byte fill.
+getrandom = "0.3"
+# URL parsing for the api-url safety classification (config.rs), the
+# same-origin redirect check (client.rs), and the direct-upload SSRF guard
+# (upload.rs).
 url = "2"
 # URL_SAFE_NO_PAD in auth.rs (JWT payload decoding) and STANDARD in upload.rs
 # (Content-MD5 Base64 encoding for ActiveStorage direct-upload) - two
@@ -76,7 +69,7 @@ base64 = "0.22"
 # verifier; do not reuse this for security-sensitive hashing.
 #
 # Caret range, matching every other pre-1.0-style crate in this manifest
-# (base64, subtle, etc.) - an earlier revision pinned this to the exact patch
+# (base64, etc.) - an earlier revision pinned this to the exact patch
 # `=0.11.0` to guard against a future 0.11.x release introducing a breaking
 # change, but that risk applies equally to every pre-1.0 dependency here, not
 # specifically to this one, so singling it out for an exact pin was
@@ -157,18 +150,11 @@ rpassword = "7"
 # two features entirely - with no compile error, just a confusing "no
 # method/derive named ..." far from this file.
 zeroize = { version = "1.9.0", features = ["serde", "derive"] }
-# Opens the SSO auth URL in the system browser without going through
+# Opens the sign-in URL in the system browser without going through
 # cmd.exe's own command-line reparsing on Windows (which can reinterpret
 # `%`/`^` inside the URL) - one small, well-established dependency instead
 # of three hand-rolled per-OS branches.
 open = "5"
-# Already present transitively (pulled in by crypto crates like `ring`);
-# declared directly for `ConstantTimeEq` - sso.rs's loopback-redirect CSRF
-# `state` check compares against a value a local adversary could otherwise
-# probe via repeated connections, so it's compared in constant time rather
-# than with `!=`, which would leak timing information about how many
-# leading bytes matched.
-subtle = "2"
 
 [dev-dependencies]
 # Serializes the env-var-mutating tests in config.rs's test module -
