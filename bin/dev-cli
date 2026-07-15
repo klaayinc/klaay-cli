@@ -12,10 +12,14 @@
 # maintained watcher; cargo-watch is unmaintained since Oct 2024. Install:
 # `brew install watchexec` or `cargo install watchexec-cli`).
 #
-# KLAAY_API_URL defaults to local Kiln (bin/dev's default port) unless set.
+# KLAAY_API_URL defaults to local Kiln (bin/dev's default port) and
+# KLAAY_WEB_URL to the local SPA (Vite's default port) unless set - the
+# browser sign-in needs the pair to point at the same environment, or the
+# production login page would try to approve against your local API.
 set -e
 cd "$(dirname "$0")/.."
 export KLAAY_API_URL="${KLAAY_API_URL:-http://localhost:3000}"
+export KLAAY_WEB_URL="${KLAAY_WEB_URL:-http://localhost:5173}"
 
 if [ "${1:-}" = "--watch" ]; then
   shift

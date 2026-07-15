@@ -276,7 +276,8 @@ impl ApiClient {
             *counts.entry(k.as_str()).or_insert(0) += 1;
         }
 
-        let mut req = self.agent.get(self.url(&format!("/{resource}")));
+        let url = self.url(&format!("/{resource}"));
+        let mut req = self.agent.get(&url);
         req = self.attach_auth(req);
 
         for (k, v) in &params.filters {
@@ -314,7 +315,7 @@ impl ApiClient {
             req = req.query("page[size]", n.to_string());
         }
 
-        send(req.call())
+        send(req.call(), &url)
     }
 
     pub(crate) fn get_one(
@@ -326,7 +327,8 @@ impl ApiClient {
     ) -> ApiResponse {
         Self::validate_path_segment(resource, "resource");
         Self::validate_path_segment(id, "id");
-        let mut req = self.agent.get(self.url(&format!("/{resource}/{id}")));
+        let url = self.url(&format!("/{resource}/{id}"));
+        let mut req = self.agent.get(&url);
         req = self.attach_auth(req);
         if let Some(include) = include {
             Self::validate_query_value(include, "include");
@@ -336,7 +338,7 @@ impl ApiClient {
             Self::validate_path_segment(type_, "fields type");
             req = req.query(format!("fields[{type_}]"), f);
         }
-        send(req.call())
+        send(req.call(), &url)
     }
 
     pub(crate) fn create(&self, resource: &str, data: &Value) -> ApiResponse {
@@ -353,10 +355,11 @@ impl ApiClient {
     pub(crate) fn delete_one(&self, resource: &str, id: &str) -> ApiResponse {
         Self::validate_path_segment(resource, "resource");
         Self::validate_path_segment(id, "id");
-        let mut req = self.agent.delete(self.url(&format!("/{resource}/{id}")));
+        let url = self.url(&format!("/{resource}/{id}"));
+        let mut req = self.agent.delete(&url);
         req = self.attach_auth(req);
         req = req.header("Content-Type", "application/vnd.api+json");
-        send(req.call())
+        send(req.call(), &url)
     }
 
     /// Resource create/update/delete. Sends `application/vnd.api+json` or the
@@ -370,14 +373,15 @@ impl ApiClient {
         let bytes =
             serde_json::to_vec(&body).expect("serializing a serde_json::Value always succeeds");
 
+        let url = self.url(path);
         let mut req = match method {
-            WriteMethod::Post => self.agent.post(self.url(path)),
-            WriteMethod::Patch => self.agent.patch(self.url(path)),
-            WriteMethod::Put => self.agent.put(self.url(path)),
+            WriteMethod::Post => self.agent.post(&url),
+            WriteMethod::Patch => self.agent.patch(&url),
+            WriteMethod::Put => self.agent.put(&url),
         };
         req = self.attach_auth(req);
         req = req.header("Content-Type", "application/vnd.api+json");
-        send(req.send(&bytes[..]))
+        send(req.send(&bytes[..]), &url)
     }
 
     /// "Hit an arbitrary path" primitive for endpoints outside the standard
@@ -403,9 +407,10 @@ impl ApiClient {
         };
         match method {
             HttpMethod::Get => {
-                let mut req = self.agent.get(self.url(&full_path));
+                let url = self.url(&full_path);
+                let mut req = self.agent.get(&url);
                 req = self.attach_auth(req);
-                send(req.call())
+                send(req.call(), &url)
             }
             HttpMethod::Delete => {
                 // `main.rs` guards `--data` on DELETE at the CLI layer, but a
@@ -416,12 +421,13 @@ impl ApiClient {
                     data.is_none(),
                     "HttpMethod::Delete does not send a body; the data argument is silently ignored"
                 );
-                let mut req = self.agent.delete(self.url(&full_path));
+                let url = self.url(&full_path);
+                let mut req = self.agent.delete(&url);
                 req = self.attach_auth(req);
                 // Kiln 415s a jsonapi_resources DELETE without this header,
                 // same as `delete_one()`.
                 req = req.header("Content-Type", "application/vnd.api+json");
-                send(req.call())
+                send(req.call(), &url)
             }
             HttpMethod::Post => self.call_write(WriteMethod::Post, &full_path, data),
             HttpMethod::Patch => self.call_write(WriteMethod::Patch, &full_path, data),
@@ -434,10 +440,11 @@ impl ApiClient {
     /// it sends the caller's `--data` verbatim rather than wrapping it in a
     /// `{"data": ...}` envelope, and sends no body at all when `data` is `None`.
     fn call_write(&self, method: WriteMethod, path: &str, data: Option<&Value>) -> ApiResponse {
+        let url = self.url(path);
         let mut req = match method {
-            WriteMethod::Post => self.agent.post(self.url(path)),
-            WriteMethod::Patch => self.agent.patch(self.url(path)),
-            WriteMethod::Put => self.agent.put(self.url(path)),
+            WriteMethod::Post => self.agent.post(&url),
+            WriteMethod::Patch => self.agent.patch(&url),
+            WriteMethod::Put => self.agent.put(&url),
         };
         req = self.attach_auth(req);
         match data {
@@ -448,11 +455,11 @@ impl ApiClient {
                 req = req.header("Content-Type", "application/vnd.api+json");
                 let bytes =
                     serde_json::to_vec(v).expect("serializing a serde_json::Value always succeeds");
-                send(req.send(&bytes[..]))
+                send(req.send(&bytes[..]), &url)
             }
             // `req.send(())` - a `WithBody` builder has no `.call()`; `()` is
             // its explicitly-empty body.
-            None => send(req.send(())),
+            None => send(req.send(()), &url),
         }
     }
 
@@ -501,7 +508,7 @@ impl ApiClient {
         for (k, v) in headers {
             req = req.header(*k, *v);
         }
-        send(req.send(body))
+        send(req.send(body), url)
     }
 
     /// Low-level PUT with no auth - blob-storage direct-upload URLs are
@@ -554,7 +561,7 @@ impl ApiClient {
         for (k, v) in headers {
             req = req.header(k.as_str(), v.as_str());
         }
-        send(req.send(body))
+        send(req.send(body), url)
     }
 }
 
@@ -588,7 +595,10 @@ fn check_origin(a: &str, b: &str) -> OriginCheck {
     }
 }
 
-fn send(result: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> ApiResponse {
+/// `url` is only for diagnostics: a transport-level failure (connection
+/// refused, DNS, TLS) otherwise prints with no indication of which server -
+/// local dev vs production - the CLI was actually talking to.
+fn send(result: Result<ureq::http::Response<ureq::Body>, ureq::Error>, url: &str) -> ApiResponse {
     match result {
         Ok(mut response) => {
             let status = response.status().as_u16();
@@ -660,7 +670,7 @@ fn send(result: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> ApiRes
             }
         }
         Err(e) => {
-            eprintln!("Request failed: {e}");
+            eprintln!("Request to {url} failed: {e}");
             std::process::exit(1);
         }
     }

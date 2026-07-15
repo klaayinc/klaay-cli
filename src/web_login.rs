@@ -46,9 +46,43 @@ pub(crate) fn login_via_browser(config: &Config) {
         std::process::exit(1);
     }
 
+    // The deployment announces its own SPA origin in the register response,
+    // so --api-url alone is sufficient against any Klaay environment - a
+    // staging API must not send the user to production's login page. An
+    // explicit --web-url/KLAAY_WEB_URL still wins; the built-in default only
+    // applies against older servers that don't announce one.
+    let server_web_url = response
+        .body()
+        .and_then(|b| b.get("data"))
+        .and_then(|d| d.get("attributes"))
+        .and_then(|a| a.get("web_url"))
+        .and_then(|w| w.as_str())
+        .map(|w| w.trim_end_matches('/').to_string());
+    let web_url = match (&server_web_url, config.web_url_explicit()) {
+        (Some(announced), false) => {
+            // Held to the same transport standard as the configured URLs -
+            // the server is trusted for *where* its login page lives, not to
+            // downgrade the plaintext policy.
+            if let Err(e) = config.check_url_security(announced) {
+                eprintln!("The server announced a sign-in page URL that can't be used: {e}");
+                std::process::exit(1);
+            }
+            announced.as_str()
+        }
+        _ => config.web_url(),
+    };
+    if server_web_url.is_none() && !config.web_url_explicit() {
+        // Older server: it accepted the request but can't say where its web
+        // app lives, so the built-in default is a guess worth flagging.
+        eprintln!(
+            "Note: this server doesn't announce its sign-in page; opening {web_url} - pass --web-url if that's the wrong web app for {}.",
+            config.api_url()
+        );
+    }
+
     // The nonce is base64url (verified by construction in `random_nonce`),
     // so embedding it in a query string needs no percent-encoding.
-    let url = format!("{}/login?app=cli&state={}", config.web_url(), &*nonce);
+    let url = format!("{}/login?app=cli&state={}", web_url, &*nonce);
     open_browser(&url);
     // The first segment doubles as a phishing check: the consent page shows
     // the same code, so the user can confirm the approval they're looking at

@@ -45,6 +45,11 @@ pub(crate) struct Config {
     // The web app origin for browser sign-in; resolved and normalized the
     // same way as `api_url`.
     web_url: String,
+    // Whether `web_url` came from the user (--web-url or KLAAY_WEB_URL)
+    // rather than the built-in default - an explicit choice always beats the
+    // server-announced origin in web_login.rs, but the built-in default
+    // yields to it.
+    web_url_explicit: bool,
     // Stored (not just consumed locally by `enforce_secure`) so other
     // insecure-transport decisions - e.g. upload.rs's plaintext-upload-URL
     // check - can reuse the same opt-in instead of inventing a second,
@@ -106,7 +111,7 @@ impl Config {
         let api_url = api_url.trim_end_matches('/').to_string();
         // Same flag -> env -> default resolution and normalization as
         // `api_url` above; the browser sign-in URL is built from this.
-        let web_url = web_url_flag
+        let web_url_from_user = web_url_flag
             .or_else(|| match std::env::var("KLAAY_WEB_URL") {
                 Ok(v) => Some(v),
                 Err(std::env::VarError::NotPresent) => None,
@@ -116,8 +121,9 @@ impl Config {
                     );
                     None
                 }
-            })
-            .unwrap_or_else(|| DEFAULT_WEB_URL.to_string());
+            });
+        let web_url_explicit = web_url_from_user.is_some();
+        let web_url = web_url_from_user.unwrap_or_else(|| DEFAULT_WEB_URL.to_string());
         let web_url = web_url.trim_end_matches('/').to_string();
         // Either the flag or the env var opts in - a script/CI pipeline that
         // can't easily pass a flag can still set the env var, same pattern
@@ -220,6 +226,7 @@ impl Config {
         Ok(Config {
             api_url,
             web_url,
+            web_url_explicit,
             force_insecure: effective_force_insecure,
         })
     }
@@ -230,6 +237,17 @@ impl Config {
 
     pub(crate) fn web_url(&self) -> &str {
         &self.web_url
+    }
+
+    pub(crate) fn web_url_explicit(&self) -> bool {
+        self.web_url_explicit
+    }
+
+    /// The same transport-security standard `resolve()` applies to the
+    /// configured URLs, exposed for URLs that only become known at runtime
+    /// (the server-announced web origin in web_login.rs).
+    pub(crate) fn check_url_security(&self, url: &str) -> Result<(), String> {
+        enforce_secure(url, self.force_insecure)
     }
 
     /// Whether the user opted into insecure (non-HTTPS, non-loopback)
