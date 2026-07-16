@@ -54,7 +54,7 @@ keyring = "4.1.4"
 # Sole source of randomness: the browser sign-in's single-use mailbox nonce
 # (web_login.rs). The OS CSPRNG via the same primitive the higher-level rand
 # stack builds on, without pulling that whole stack in for one 16-byte fill.
-getrandom = "0.3"
+getrandom = "0.4"
 # URL parsing for the api-url safety classification (config.rs), the
 # same-origin redirect check (client.rs), and the direct-upload SSRF guard
 # (upload.rs).
