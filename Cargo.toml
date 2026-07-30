@@ -62,7 +62,7 @@ url = "2"
 # URL_SAFE_NO_PAD in auth.rs (JWT payload decoding) and STANDARD in upload.rs
 # (Content-MD5 Base64 encoding for ActiveStorage direct-upload) - two
 # distinct call sites, not a redundant transitive pull-in.
-base64 = "0.22"
+base64 = "0.23"
 # Used exclusively for the Base64-encoded Content-MD5 header required by
 # ActiveStorage's direct-upload API (see upload.rs) - not used for any
 # security or integrity verification. The server is the authoritative
