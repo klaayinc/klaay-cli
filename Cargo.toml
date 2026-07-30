@@ -161,7 +161,7 @@ open = "5"
 # `std::env::set_var`/`remove_var` are process-global, and `cargo test` runs
 # tests concurrently by default, so without this two tests setting different
 # values for the same env var could race and produce flaky results.
-serial_test = "3"
+serial_test = "4"
 # RAII wrapper around std::env::set_var/remove_var for those same tests -
 # restores whatever value (or absence) the variable had before the test ran
 # once the scoped closure returns, including on panic, rather than each test
