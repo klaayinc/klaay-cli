@@ -1,0 +1,12 @@
+{
+  "rules": [
+    {
+      "path": "**/*.rs",
+      "rule": ".opencodereview/rust.md",
+      "merge_system_rule": true
+    }
+  ],
+  "exclude": [
+    ".opencodereview/**"
+  ]
+}
