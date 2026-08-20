@@ -1,0 +1,281 @@
+# Builds, signs, and publishes the Klaay CLI to a GitHub Release.
+# macOS signing/notarization mirrors klaayguard's release-macos.yml and uses
+# the same secret names, so the existing Apple credentials copy over 1:1.
+#
+# Also runs on every PR: same build + package against the PR's code, but
+# UNSIGNED - signing/notarization runs only on release dispatch. The sign ->
+# notarize -> spctl path was proven end-to-end on PR runs before this gate
+# was added (monorepo PR #134, run 29495630070: notarytool Accepted +
+# "Notarized Developer ID" on both architectures).
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (must match Cargo.toml, e.g. 0.1.0)"
+        required: true
+        type: string
+  pull_request:
+
+# Read by default; only `publish` (the single release writer) gets write.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release_tag: v${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Never inline ${{ inputs.* }} in run: scripts - shell injection.
+      - name: Resolve version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          CARGO_VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$CARGO_VERSION" != "$INPUT_VERSION" ]; then
+            echo "::error::Input version $INPUT_VERSION does not match Cargo.toml ($CARGO_VERSION)"
+            exit 1
+          fi
+          echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    # macos-latest is the expensive runner - only dispatch runs and same-repo
+    # PRs may spend it (fork PRs are the paid-runner threat). Checked by head
+    # repo, not author_association, which reports private org memberships
+    # inconsistently and silently skipped these jobs for MEMBER-authored PRs.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    needs: prepare
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      ARCH: ${{ matrix.arch }}
+      TARGET: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-apple-darwin
+          - arch: x64
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v7
+
+      # Same toolchain as rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target "$TARGET"
+
+      # Signing/notarization is dispatch-only: PR runs ship unsigned builds so
+      # every CLI PR doesn't submit to Apple's notary service.
+      - name: Check signing secrets
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_CERTIFICATE:-}" ]; then
+            echo "::error::APPLE_CERTIFICATE is not set - copy the Apple signing secrets from the klaayguard repo (same names)."
+            exit 1
+          fi
+
+      - name: Import Apple Developer Certificate
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # The keychain is a throwaway on an ephemeral runner; its password
+          # guards nothing durable, so a per-run random value beats a secret.
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          security find-identity -v -p codesigning build.keychain
+
+      - name: Sign & notarize
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          BINARY="target/$TARGET/release/klaay"
+
+          codesign --force --options runtime --timestamp \
+            --sign "$APPLE_SIGNING_IDENTITY" "$BINARY"
+          codesign --verify --strict --verbose=2 "$BINARY"
+
+          # A notarization ticket can't be stapled to a bare executable, so the
+          # zip itself is what ships; Gatekeeper checks the ticket online.
+          NOTARY_ZIP="notary-submission.zip"
+          zip -j "$NOTARY_ZIP" "$BINARY"
+
+          # --wait can complete with status Invalid without a useful exit code,
+          # and a bare binary has no staple step to catch that afterwards -
+          # so require Accepted explicitly and dump Apple's log otherwise.
+          SUBMISSION=$(xcrun notarytool submit "$NOTARY_ZIP" \
+            --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+            --wait --output-format json)
+          echo "$SUBMISSION"
+          STATUS=$(echo "$SUBMISSION" | jq -r '.status')
+          if [ "$STATUS" != "Accepted" ]; then
+            SUBMISSION_ID=$(echo "$SUBMISSION" | jq -r '.id')
+            xcrun notarytool log "$SUBMISSION_ID" \
+              --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" || true
+            echo "::error::Notarization status was $STATUS, not Accepted"
+            exit 1
+          fi
+
+          # Gatekeeper's own verdict, via the online ticket (nothing to staple
+          # onto a bare binary). Retries because ticket propagation can lag a
+          # few seconds behind Accepted.
+          for attempt in 1 2 3; do
+            SPCTL_OUT=$(spctl -a -vv -t install "$BINARY" 2>&1 || true)
+            echo "$SPCTL_OUT"
+            if echo "$SPCTL_OUT" | grep -q "Notarized Developer ID"; then
+              break
+            fi
+            if [ "$attempt" = "3" ]; then
+              echo "::error::spctl did not report 'Notarized Developer ID' for $BINARY"
+              exit 1
+            fi
+            sleep 10
+          done
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          zip -j "klaay_${VERSION}_macOS_${ARCH}.zip" "target/$TARGET/release/klaay"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: klaay-macOS-${{ matrix.arch }}
+          path: klaay_*_macOS_*.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  linux:
+    name: Linux x86_64 (musl)
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          tar -czf "klaay_${VERSION}_Linux_x86_64.tar.gz" -C target/x86_64-unknown-linux-musl/release klaay
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: klaay-Linux-x86_64
+          path: klaay_*_Linux_*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  windows:
+    name: Windows x86_64
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+
+      # Unsigned: Authenticode needs a separate certificate/process (tracked in
+      # PROD-3833's out-of-scope note).
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/x86_64-pc-windows-msvc/release/klaay.exe -DestinationPath "klaay_${env:VERSION}_Windows_x86_64.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: klaay-Windows-x86_64
+          path: klaay_*_Windows_*.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish release
+    if: github.event_name == 'workflow_dispatch'
+    needs: [prepare, macos, linux, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      # Draft until every asset is attached, so a failure here never leaves a
+      # half-populated public release.
+      - name: Create release with all assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ls -l assets/
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --draft --title "Klaay CLI v$VERSION" --notes "Klaay CLI v$VERSION"
+          fi
+          gh release upload "$RELEASE_TAG" assets/* --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
