@@ -2,26 +2,17 @@
 name = "klaay-cli"
 version = "0.1.0"
 edition = "2021"
-# Not currently published anywhere (no crates.io listing yet - see README).
-# "UNLICENSED" isn't a valid SPDX identifier (cargo publish and SPDX-aware
-# tooling would flag it) - license-file + a real proprietary-rights LICENSE
-# is the conventional way to express "not open source" without a bogus SPDX
-# expression.
-license-file = "LICENSE"
-# Machine-enforces the "not published anywhere" intent above - without this,
-# nothing stops an accidental `cargo publish` from actually uploading it.
+# Same license as klaayguard, the other open-source Klaay client.
+license = "GPL-3.0-only"
+# Not on crates.io yet (see README) - without this, nothing stops an
+# accidental `cargo publish` from actually uploading it.
 publish = false
 # The highest MSRV among our own direct dependencies (keyring 4.1.4 requires
 # 1.88.0; ureq/clap need 1.85) - verified against each
 # dependency's own Cargo.toml rather than assumed.
 rust-version = "1.88"
 description = "Command-line client for the Klaay API"
-# Kept despite `publish = false` above - not for crates.io (this crate is
-# never published there), but as accurate provenance for `cargo metadata`
-# consumers, IDE tooling, and anyone reading this manifest directly. Has no
-# effect on the "never published" guarantee `publish = false` already
-# enforces on its own.
-repository = "https://github.com/klaayinc/klaay"
+repository = "https://github.com/klaayinc/klaay-cli"
 
 [[bin]]
 name = "klaay"
@@ -73,7 +64,7 @@ base64 = "0.23"
 # `=0.11.0` to guard against a future 0.11.x release introducing a breaking
 # change, but that risk applies equally to every pre-1.0 dependency here, not
 # specifically to this one, so singling it out for an exact pin was
-# inconsistent. The `cargo`/`/apps/cli` entry in `.github/dependabot.yml`
+# inconsistent. The `cargo` entry in `.github/dependabot.yml`
 # already covers getting a PR for any future minor bump on every crate in
 # this file, this one included.
 md-5 = "0.11"
@@ -161,7 +152,10 @@ open = "5"
 # `std::env::set_var`/`remove_var` are process-global, and `cargo test` runs
 # tests concurrently by default, so without this two tests setting different
 # values for the same env var could race and produce flaky results.
-serial_test = "4"
+# Not "4": serial_test 4.0.1 requires rustc 1.93.1, above this crate's
+# rust-version of 1.88, and 4.0.0 is yanked. Dependabot's bump to 4.0.1
+# (monorepo PR #148) never compiled `cargo test` on the pinned toolchain.
+serial_test = "3.5"
 # RAII wrapper around std::env::set_var/remove_var for those same tests -
 # restores whatever value (or absence) the variable had before the test ran
 # once the scoped closure returns, including on panic, rather than each test

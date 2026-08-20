@@ -4,9 +4,8 @@ This binary statically links the 261 Rust crates listed below (via `cargo
 metadata`). Every one uses a permissive license (MIT, Apache-2.0, BSD,
 ISC, Unicode-3.0, 0BSD, Zlib, Unlicense, CDLA-Permissive-2.0) or a
 file-scoped weak-copyleft license used unmodified (MPL-2.0, `option-ext`)
-— none require the combined work to be relicensed or its source
-disclosed, so none conflict with distributing this CLI under `LICENSE`'s
-proprietary terms. Where a crate offers a choice of licenses (e.g. `MIT
+— all are compatible with distributing this CLI under `LICENSE`'s
+GPL-3.0 terms. Where a crate offers a choice of licenses (e.g. `MIT
 OR Apache-2.0`), only one need be honored; `r-efi`'s `LGPL-2.1-or-later`
 option is likewise not the one being relied on given the `MIT`/`Apache-2.0`
 alternatives it also offers.
@@ -14,7 +13,7 @@ alternatives it also offers.
 Regenerate this table after any dependency change with:
 
 ```
-cargo metadata --format-version 1 --manifest-path apps/cli/Cargo.toml \
+cargo metadata --format-version 1 \
   | jq -r '.packages[] | select(.name != "klaay-cli") | "| \(.name) | \(.version) | \(.license // "UNKNOWN") |"' \
   | sort -f
 ```
