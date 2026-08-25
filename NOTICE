@@ -1,0 +1,27 @@
+Klaay CLI
+Copyright (C) 2026 Klaay ApS
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See the LICENSE file for the full text.
+
+------------------------------------------------------------------------------
+Third-party software
+------------------------------------------------------------------------------
+
+Rust dependencies
+  The Klaay CLI links many Rust crates under permissive and weak-copyleft
+  licenses (MIT, Apache-2.0, MPL-2.0, BSD, ISC, Unicode-3.0, 0BSD, Zlib,
+  Unlicense, and CDLA-Permissive-2.0). The full list is in
+  THIRD_PARTY_LICENSES.md. Every one is compatible with GPL-3.0-or-later.
+
+  The binary is statically linked. It needs no runtime beyond the operating
+  system itself.
+
+------------------------------------------------------------------------------
+Trademarks
+------------------------------------------------------------------------------
+
+Klaay and the Klaay logo are trademarks of Klaay ApS. The GPL-3.0 license
+grants no rights to use these marks. See TRADEMARK.md.

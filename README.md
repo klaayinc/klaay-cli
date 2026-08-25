@@ -1,7 +1,13 @@
-# klaay
+# Klaay CLI
 
-Command-line client for the Klaay API. A single, self-contained binary — no
-Node, Ruby, or Python runtime required.
+[![CI](https://github.com/klaayinc/klaay-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/klaayinc/klaay-cli/actions/workflows/ci.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+
+Command-line client for the [Klaay](https://klaay.com) API. A single,
+self-contained binary — no Node, Ruby, or Python runtime required.
+
+Klaay is a compliance platform. This CLI drives the same API the web app uses,
+so you can script your SOC 2 program or let an AI agent work it for you.
 
 ## Quickstart for AI agents
 
@@ -33,20 +39,37 @@ it tells you exactly what went wrong.
 
 ## Install
 
-No published release or crates.io listing exists yet — distribution channel
-(GitHub Releases install script, Homebrew tap, `cargo install` via crates.io)
-is still an open decision (see the plan). Until then, build from source:
+Download the binary for your platform from the
+[latest release](https://github.com/klaayinc/klaay-cli/releases/latest), then put
+it on your `PATH`.
 
+The macOS builds are signed and notarized by Klaay ApS, so Gatekeeper accepts
+them without a warning. The Windows build is not signed yet.
+
+```bash
+# macOS (Apple silicon)
+curl -LO https://github.com/klaayinc/klaay-cli/releases/latest/download/klaay_0.1.0_macOS_arm64.zip
+unzip klaay_0.1.0_macOS_arm64.zip && chmod +x klaay && sudo mv klaay /usr/local/bin/
+
+# Linux x86_64
+curl -LO https://github.com/klaayinc/klaay-cli/releases/latest/download/klaay_0.1.0_Linux_x86_64.tar.gz
+tar -xzf klaay_0.1.0_Linux_x86_64.tar.gz && sudo mv klaay /usr/local/bin/
 ```
+
+There is no crates.io listing and no Homebrew tap yet.
+
+To build from source instead:
+
+```bash
 cargo build --release
 # binary at target/release/klaay
 ```
 
-## Developing against a local Kiln
+## Developing against a local server
 
 `bin/dev-cli <args>` runs the CLI with an always-fresh build and
-`KLAAY_API_URL` defaulted to `http://localhost:3000` (Kiln's `bin/dev`
-default port) unless already set. It's one-shot: `cargo run` rebuilds only
+`KLAAY_API_URL` defaulted to `http://localhost:3000` (the Klaay API server's
+default development port) unless already set. It's one-shot: `cargo run` rebuilds only
 when sources changed, runs your command, and returns to the prompt — it does
 not hold the terminal:
 
@@ -142,7 +165,7 @@ fits into the program (grounded in Klaay's own compliance-workflow
 documentation and real model relationships, not invented), and which other
 resources it's normally used alongside. These are embedded into the binary
 at compile time (`src/skills.rs`) and shown by `klaay describe <resource>`
-above the live spec-derived section. This is content Kiln's OpenAPI spec
+above the live spec-derived section. This is content the OpenAPI spec
 can't capture on its own — it's narrative workflow knowledge, not a filter
 or attribute list — so it's curated here instead of auto-derived.
 
@@ -185,3 +208,26 @@ When the OS keychain is available (the common case on macOS/Windows/Linux
 desktops), the token lives there instead, under the service name `klaay-cli`.
 Uninstalling the binary doesn't touch either — `klaay logout` is the explicit
 way to clear a session.
+
+## Contributing
+
+Klaay welcomes issues and pull requests. Read [CONTRIBUTING.md](CONTRIBUTING.md)
+for the build steps, the checks a change must pass, and the writing standard.
+The CLA Assistant bot asks you to sign the [CLA](CLA.md) on your first pull
+request.
+
+Report a security problem in private. Follow [SECURITY.md](SECURITY.md); never
+open a public issue for one.
+
+This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md).
+
+## License
+
+GPL-3.0-or-later. See [LICENSE](LICENSE) for the full text and
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for the crates this binary
+links.
+
+The code is free software. The names and the logo are not — see
+[TRADEMARK.md](TRADEMARK.md).
+
+Copyright (C) 2026 Klaay ApS.

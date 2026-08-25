@@ -2,8 +2,7 @@
 name = "klaay-cli"
 version = "0.1.0"
 edition = "2021"
-# Same license as klaayguard, the other open-source Klaay client.
-license = "GPL-3.0-only"
+license = "GPL-3.0-or-later"
 # Not on crates.io yet (see README) - without this, nothing stops an
 # accidental `cargo publish` from actually uploading it.
 publish = false
@@ -153,8 +152,7 @@ open = "5"
 # tests concurrently by default, so without this two tests setting different
 # values for the same env var could race and produce flaky results.
 # Not "4": serial_test 4.0.1 requires rustc 1.93.1, above this crate's
-# rust-version of 1.88, and 4.0.0 is yanked. Dependabot's bump to 4.0.1
-# (monorepo PR #148) never compiled `cargo test` on the pinned toolchain.
+# rust-version of 1.88, and 4.0.0 is yanked.
 serial_test = "3.5"
 # RAII wrapper around std::env::set_var/remove_var for those same tests -
 # restores whatever value (or absence) the variable had before the test ran

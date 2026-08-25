@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 use crate::client::{ApiClient, ApiResponse, HttpMethod, ListParams};
 use crate::config::Config;
 use crate::token_store::{self, StoredToken};

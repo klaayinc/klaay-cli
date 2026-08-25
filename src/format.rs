@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 /// One-word name of a JSON value's type, for error messages like
 /// "expected a string, got a {json_type_name}". Lives in its own module
 /// (not `main.rs`, the crate root) so a non-CLI-dispatch helper module

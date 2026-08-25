@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 use crate::auth;
 use crate::client::ApiClient;
 use crate::config::Config;

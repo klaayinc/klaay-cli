@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 use crate::client::{ApiClient, HttpMethod};
 use crate::config::{bin_name, openapi_cache_path};
 use serde_json::Value;

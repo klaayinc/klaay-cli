@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 use crate::client::ApiClient;
 use crate::format::json_type_name;
 use base64::{engine::general_purpose::STANDARD, Engine as _};

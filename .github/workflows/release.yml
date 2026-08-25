@@ -1,12 +1,8 @@
 # Builds, signs, and publishes the Klaay CLI to a GitHub Release.
-# macOS signing/notarization mirrors klaayguard's release-macos.yml and uses
-# the same secret names, so the existing Apple credentials copy over 1:1.
 #
-# Also runs on every PR: same build + package against the PR's code, but
-# UNSIGNED - signing/notarization runs only on release dispatch. The sign ->
-# notarize -> spctl path was proven end-to-end on PR runs before this gate
-# was added (monorepo PR #134, run 29495630070: notarytool Accepted +
-# "Notarized Developer ID" on both architectures).
+# Also runs on every pull request: the same build and package against the
+# pull request's code, but UNSIGNED. Signing and notarization run only on a
+# release dispatch, so a routine pull request never submits to Apple.
 name: release
 
 on:
@@ -96,7 +92,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${APPLE_CERTIFICATE:-}" ]; then
-            echo "::error::APPLE_CERTIFICATE is not set - copy the Apple signing secrets from the klaayguard repo (same names)."
+            echo "::error::APPLE_CERTIFICATE is not set - a maintainer must add the Apple signing secrets to this repository."
             exit 1
           fi
 
@@ -234,8 +230,7 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target x86_64-pc-windows-msvc
 
-      # Unsigned: Authenticode needs a separate certificate/process (tracked in
-      # PROD-3833's out-of-scope note).
+      # Unsigned: Authenticode needs a separate certificate and process.
       - name: Package
         shell: pwsh
         run: |

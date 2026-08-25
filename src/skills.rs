@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Curated, hand-written guidance per core resource type: what it is, how it
 //! fits into the SOC 2 compliance journey, and which other resources it's
 //! commonly used alongside. This is content Kiln's own OpenAPI spec doesn't
