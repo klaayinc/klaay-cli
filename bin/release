@@ -1,0 +1,108 @@
+#!/usr/bin/env sh
+# Cut a stable release.
+#
+#   bin/release 0.2.0
+#
+# The steps, in order:
+#   1. Open a pull request that bumps Cargo.toml to the new version. Main
+#      requires a pull request with one approval, so there is no direct push.
+#   2. Wait until that pull request merges.
+#   3. Dispatch the release workflow, which builds, signs, notarizes, and
+#      publishes the GitHub release, and watch it to the end.
+#
+# The script is safe to re-run at any step: it reuses an open bump pull
+# request, and a merged bump skips straight to the dispatch.
+#
+# Nightlies need none of this - the release workflow publishes a signed
+# pre-release every night on its own when main has new commits.
+set -eu
+
+cd "$(dirname "$0")/.."
+REPO="klaayinc/klaay-cli"
+
+VERSION="${1:-}"
+if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  echo "usage: bin/release X.Y.Z" >&2
+  exit 1
+fi
+TAG="v$VERSION"
+BRANCH="release-$TAG"
+
+gh auth status >/dev/null
+git fetch --quiet origin main "+refs/tags/*:refs/tags/*"
+
+if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
+  echo "error: tag $TAG already exists - pick the next version." >&2
+  exit 1
+fi
+
+main_version() {
+  git show origin/main:Cargo.toml | grep -m1 '^version = ' | cut -d'"' -f2
+}
+
+if [ "$(main_version)" != "$VERSION" ]; then
+  PR_STATE=$(gh pr view "$BRANCH" --repo "$REPO" --json state --jq .state 2>/dev/null || echo NONE)
+  if [ "$PR_STATE" = "OPEN" ]; then
+    echo "Reusing the open bump pull request for $BRANCH."
+  else
+    echo "Opening a pull request that bumps Cargo.toml to $VERSION..."
+    WORKTREE=$(mktemp -d)
+    git worktree add --quiet "$WORKTREE" --detach origin/main
+    (
+      cd "$WORKTREE"
+      # The first `version = ` line is the [package] version; dependency
+      # version keys are indented or inline, so they never match.
+      awk -v v="$VERSION" \
+        '!done && /^version = / { sub(/"[^"]*"/, "\"" v "\""); done = 1 } { print }' \
+        Cargo.toml > Cargo.toml.new
+      mv Cargo.toml.new Cargo.toml
+      # Sync the lockfile's own-crate entry; leaves dependencies pinned.
+      cargo update --workspace --quiet
+      git checkout --quiet -B "$BRANCH"
+      git commit --quiet -am "Release $TAG"
+      git push --quiet --force origin "$BRANCH"
+    )
+    git worktree remove --force "$WORKTREE"
+    git branch --quiet -D "$BRANCH"
+    gh pr create --repo "$REPO" --head "$BRANCH" \
+      --title "Release $TAG" \
+      --body "Bump the version to $VERSION so the release workflow can publish $TAG."
+    # Auto-merge is a repository setting; without it, a maintainer merges by
+    # hand after approval and this script keeps waiting either way.
+    gh pr merge "$BRANCH" --repo "$REPO" --auto --squash 2>/dev/null ||
+      echo "Auto-merge is off for this repository - merge the pull request once it is approved."
+  fi
+
+  echo "Waiting for the bump pull request to merge (it needs one approval)..."
+  while :; do
+    PR_STATE=$(gh pr view "$BRANCH" --repo "$REPO" --json state --jq .state)
+    case "$PR_STATE" in
+      MERGED) break ;;
+      CLOSED)
+        echo "error: the bump pull request was closed without merging." >&2
+        exit 1
+        ;;
+    esac
+    sleep 15
+  done
+  git fetch --quiet origin main
+fi
+
+echo "Dispatching the release workflow for $TAG..."
+gh workflow run release --repo "$REPO" --ref main -f "version=$VERSION"
+
+# The dispatched run takes a moment to appear.
+RUN_ID=""
+for _ in 1 2 3 4 5 6; do
+  sleep 5
+  RUN_ID=$(gh run list --repo "$REPO" --workflow release --event workflow_dispatch \
+    --branch main --limit 1 --json databaseId --jq '.[0].databaseId')
+  [ -n "$RUN_ID" ] && break
+done
+if [ -z "$RUN_ID" ]; then
+  echo "error: the dispatched run did not appear - check the Actions tab." >&2
+  exit 1
+fi
+
+gh run watch "$RUN_ID" --repo "$REPO" --exit-status
+echo "Released: https://github.com/$REPO/releases/tag/$TAG"

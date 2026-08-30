@@ -1,8 +1,13 @@
 # Builds, signs, and publishes the Klaay CLI to a GitHub Release.
 #
-# Also runs on every pull request: the same build and package against the
-# pull request's code, but UNSIGNED. Signing and notarization run only on a
-# release dispatch, so a routine pull request never submits to Apple.
+# Three triggers:
+#   - workflow_dispatch: a stable release, cut with bin/release.
+#   - schedule: a nightly pre-release, published only when main gained
+#     commits since the last release or nightly.
+#   - pull_request: the same build and package against the pull request's
+#     code, but UNSIGNED and never published. Signing and notarization run
+#     only for dispatch and schedule, so a routine pull request never
+#     submits to Apple.
 name: release
 
 on:
@@ -12,6 +17,9 @@ on:
         description: "Version to release (must match Cargo.toml, e.g. 0.1.0)"
         required: true
         type: string
+  schedule:
+    # 02:15 UTC, off the top of the hour where GitHub delays cron runs.
+    - cron: "15 2 * * *"
   pull_request:
 
 # Read by default; only `publish` (the single release writer) gets write.
@@ -30,8 +38,14 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       release_tag: v${{ steps.version.outputs.version }}
+      version_suffix: ${{ steps.version.outputs.version_suffix }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      build: ${{ steps.version.outputs.build }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The nightly change check reads every tag and its commit.
+          fetch-depth: 0
 
       # Never inline ${{ inputs.* }} in run: scripts - shell injection.
       - name: Resolve version
@@ -41,27 +55,56 @@ jobs:
         run: |
           set -euo pipefail
           CARGO_VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$CARGO_VERSION" != "$INPUT_VERSION" ]; then
-            echo "::error::Input version $INPUT_VERSION does not match Cargo.toml ($CARGO_VERSION)"
-            exit 1
-          fi
-          echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
+          VERSION="$CARGO_VERSION"
+          SUFFIX=""
+          PRERELEASE=false
+          BUILD=true
+          case "$GITHUB_EVENT_NAME" in
+            workflow_dispatch)
+              if [ "$CARGO_VERSION" != "$INPUT_VERSION" ]; then
+                echo "::error::Input version $INPUT_VERSION does not match Cargo.toml ($CARGO_VERSION)"
+                exit 1
+              fi
+              ;;
+            schedule)
+              SUFFIX="-nightly.$(date -u +%Y%m%d)"
+              VERSION="$CARGO_VERSION$SUFFIX"
+              PRERELEASE=true
+              # Every publish (stable or nightly) tags the commit it shipped,
+              # so a HEAD that already carries a v* tag has nothing new.
+              if [ -n "$(git tag --list 'v*' --points-at HEAD)" ]; then
+                echo "No commits since the last release - skipping this nightly."
+                BUILD=false
+              fi
+              ;;
+          esac
+          {
+            echo "version=$VERSION"
+            echo "version_suffix=$SUFFIX"
+            echo "prerelease=$PRERELEASE"
+            echo "build=$BUILD"
+          } >> "$GITHUB_OUTPUT"
 
   macos:
     name: macOS ${{ matrix.arch }}
-    # macos-latest is the expensive runner - only dispatch runs and same-repo
-    # PRs may spend it (fork PRs are the paid-runner threat). Checked by head
-    # repo, not author_association, which reports private org memberships
-    # inconsistently and silently skipped these jobs for MEMBER-authored PRs.
+    # macos-latest is the expensive runner - only release runs (dispatch,
+    # nightly) and same-repo PRs may spend it (fork PRs are the paid-runner
+    # threat). Checked by head repo, not author_association, which reports
+    # private org memberships inconsistently and silently skipped these jobs
+    # for MEMBER-authored PRs.
     if: >
-      github.event_name == 'workflow_dispatch' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      needs.prepare.outputs.build == 'true' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     needs: prepare
     runs-on: macos-latest
     timeout-minutes: 45
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      # Stamps `--version` with the nightly suffix (empty on stable and PR
+      # builds - option_env! then leaves the crate version alone).
+      KLAAY_VERSION_SUFFIX: ${{ needs.prepare.outputs.version_suffix }}
       ARCH: ${{ matrix.arch }}
       TARGET: ${{ matrix.target }}
     strategy:
@@ -83,10 +126,11 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target "$TARGET"
 
-      # Signing/notarization is dispatch-only: PR runs ship unsigned builds so
-      # every CLI PR doesn't submit to Apple's notary service.
+      # Signing/notarization runs for releases only (dispatch and nightly):
+      # PR runs ship unsigned builds so every CLI PR doesn't submit to
+      # Apple's notary service.
       - name: Check signing secrets
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name != 'pull_request'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
         run: |
@@ -97,7 +141,7 @@ jobs:
           fi
 
       - name: Import Apple Developer Certificate
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name != 'pull_request'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -116,7 +160,7 @@ jobs:
           security find-identity -v -p codesigning build.keychain
 
       - name: Sign & notarize
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name != 'pull_request'
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -181,12 +225,14 @@ jobs:
 
   linux:
     name: Linux x86_64 (musl)
+    if: needs.prepare.outputs.build == 'true'
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      KLAAY_VERSION_SUFFIX: ${{ needs.prepare.outputs.version_suffix }}
     steps:
       - uses: actions/checkout@v7
 
@@ -214,12 +260,14 @@ jobs:
 
   windows:
     name: Windows x86_64
+    if: needs.prepare.outputs.build == 'true'
     needs: prepare
     runs-on: windows-latest
     timeout-minutes: 30
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      KLAAY_VERSION_SUFFIX: ${{ needs.prepare.outputs.version_suffix }}
     steps:
       - uses: actions/checkout@v7
 
@@ -245,7 +293,7 @@ jobs:
 
   publish:
     name: Publish release
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name != 'pull_request' && needs.prepare.outputs.build == 'true'
     needs: [prepare, macos, linux, windows]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -254,6 +302,7 @@ jobs:
     env:
       RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
       VERSION: ${{ needs.prepare.outputs.version }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -261,7 +310,11 @@ jobs:
           merge-multiple: true
 
       # Draft until every asset is attached, so a failure here never leaves a
-      # half-populated public release.
+      # half-populated public release. --target pins the tag to the commit
+      # this run built, not whatever main points at by publish time.
+      #
+      # A nightly is marked pre-release, so GitHub's "latest" (and the
+      # README's /releases/latest links) keep pointing at the stable.
       - name: Create release with all assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -269,8 +322,15 @@ jobs:
           set -euo pipefail
           ls -l assets/
           if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-              --draft --title "Klaay CLI v$VERSION" --notes "Klaay CLI v$VERSION"
+            if [ "$PRERELEASE" = "true" ]; then
+              gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+                --draft --prerelease --target "$GITHUB_SHA" \
+                --title "Klaay CLI v$VERSION" --generate-notes
+            else
+              gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+                --draft --target "$GITHUB_SHA" \
+                --title "Klaay CLI v$VERSION" --notes "Klaay CLI v$VERSION"
+            fi
           fi
           gh release upload "$RELEASE_TAG" assets/* --repo "$GITHUB_REPOSITORY" --clobber
           gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
