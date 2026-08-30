@@ -89,15 +89,25 @@ if [ "$(main_version)" != "$VERSION" ]; then
 fi
 
 echo "Dispatching the release workflow for $TAG..."
+# Record the newest dispatch run BEFORE dispatching, then wait for a run
+# with a different id - the newest run alone may be an old one, and
+# watching that reports success for a release that has not happened yet.
+# The `// ""` keeps the first ever release from reading `null` as a run.
+newest_run() {
+  gh run list --repo "$REPO" --workflow release --event workflow_dispatch \
+    --branch main --limit 1 --json databaseId --jq '.[0].databaseId // ""'
+}
+BEFORE=$(newest_run)
 gh workflow run release --repo "$REPO" --ref main -f "version=$VERSION"
 
-# The dispatched run takes a moment to appear.
 RUN_ID=""
 for _ in 1 2 3 4 5 6; do
   sleep 5
-  RUN_ID=$(gh run list --repo "$REPO" --workflow release --event workflow_dispatch \
-    --branch main --limit 1 --json databaseId --jq '.[0].databaseId')
-  [ -n "$RUN_ID" ] && break
+  CANDIDATE=$(newest_run)
+  if [ -n "$CANDIDATE" ] && [ "$CANDIDATE" != "$BEFORE" ]; then
+    RUN_ID="$CANDIDATE"
+    break
+  fi
 done
 if [ -z "$RUN_ID" ]; then
   echo "error: the dispatched run did not appear - check the Actions tab." >&2
