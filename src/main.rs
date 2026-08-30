@@ -54,11 +54,20 @@ fn web_url_help() -> String {
     )
 }
 
+/// The string `--version` prints: the crate version, plus the build-time
+/// `KLAAY_VERSION_SUFFIX` when set (the nightly workflow passes
+/// `-nightly.YYYYMMDD`). A nightly binary must name the nightly it came
+/// from, not the stable version it predates - Cargo.toml stays untouched,
+/// so release builds keep `--locked`.
+fn compose_version(base: &str, suffix: Option<&str>) -> String {
+    format!("{base}{}", suffix.unwrap_or(""))
+}
+
 #[derive(Parser)]
 #[command(
     name = "klaay",
     about = "Command-line client for the Klaay API",
-    version
+    version = compose_version(env!("CARGO_PKG_VERSION"), option_env!("KLAAY_VERSION_SUFFIX"))
 )]
 struct Cli {
     // `help = api_url_help()`, not a `///` doc comment with the URL spelled
@@ -827,4 +836,22 @@ fn warn_if_orphaned_upload(response: &client::ApiResponse, uploads_completed: bo
 fn exit_with_error(message: impl std::fmt::Display) -> ! {
     eprintln!("{message}");
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compose_version;
+
+    #[test]
+    fn version_without_suffix_is_the_crate_version() {
+        assert_eq!(compose_version("0.1.0", None), "0.1.0");
+    }
+
+    #[test]
+    fn version_with_suffix_appends_it() {
+        assert_eq!(
+            compose_version("0.1.0", Some("-nightly.20260830")),
+            "0.1.0-nightly.20260830"
+        );
+    }
 }

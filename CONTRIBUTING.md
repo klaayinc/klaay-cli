@@ -81,6 +81,21 @@ Klaay staff merge to `main`. Branch protection requires a passing CI run and a
 review from a maintainer. Open your pull request from a fork; the CI job runs on
 it automatically.
 
+## How a release gets published
+
+The release workflow publishes two kinds of GitHub release:
+
+- A nightly. The workflow runs every night. When `main` gained commits since
+  the last release, it builds, signs, and publishes a pre-release tagged
+  `vX.Y.Z-nightly.YYYYMMDD`. When nothing changed, it skips the night. The
+  binary reports the nightly version through `klaay --version`.
+- A stable release. A maintainer runs `bin/release X.Y.Z`. The script opens a
+  pull request that bumps `Cargo.toml`, waits for it to merge, then dispatches
+  the release workflow and watches it to the end.
+
+GitHub marks a pre-release as not "latest", so the install links in the README
+always point at the newest stable release.
+
 ## Writing standard for prose
 
 All prose in this repository — documentation, code comments, commit messages,

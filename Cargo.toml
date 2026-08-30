@@ -18,7 +18,9 @@ name = "klaay"
 path = "src/main.rs"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
+# "string" lets `version =` take the owned String that `compose_version`
+# builds at startup (clap's default Str only accepts &'static str).
+clap = { version = "4", features = ["derive", "string"] }
 ureq = { version = "3", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
