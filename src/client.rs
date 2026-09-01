@@ -140,8 +140,12 @@ impl ApiClient {
         // http_status_as_error(false): non-2xx bodies still parse as JSON:API
         // errors rather than opaque ureq::Errors. Timeouts bound how long a
         // hung server can block the process.
+        // Names this client and its version on every request. Without it the
+        // server cannot tell a CLI call from anything else, so the count that
+        // decides when an old endpoint may be removed has nobody to name.
         let config = ureq::Agent::config_builder()
             .http_status_as_error(false)
+            .user_agent(concat!("klaay-cli/", env!("CARGO_PKG_VERSION")))
             .timeout_connect(Some(std::time::Duration::from_secs(10)))
             .timeout_global(Some(std::time::Duration::from_secs(60)))
             .build();

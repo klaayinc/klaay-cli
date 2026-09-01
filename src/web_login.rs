@@ -3,19 +3,32 @@ use crate::auth;
 use crate::client::ApiClient;
 use crate::config::Config;
 use base64::Engine;
+use sha2::{Digest, Sha256};
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
 use std::time::{Duration, Instant};
 
-// Browser sign-in via the server-side nonce mailbox (kiln's
-// /cli_auth_requests endpoints), the device-authorization-grant shape and
-// the same pattern KlaayGuard's `?app=...&state=...` login flow uses: this
-// process never talks to an identity provider and needs no OAuth client
-// registration. It registers a single-use nonce, opens the normal Klaay
-// login page in the browser (which supports every sign-in method the
-// deployment has), and polls until the signed-in user approves the CLI -
-// at which point the server mints the long-lived `client: "cli"` token
-// into the mailbox for exactly one retrieval. Works even when the browser
-// runs on a different machine than this process (e.g. over SSH), since
-// the handoff goes through the server, not a loopback port.
+// Browser sign-in through kiln's /cli_auth_requests mailbox. This process
+// never talks to an identity provider and needs no OAuth client
+// registration: it opens the normal Klaay login page, which supports every
+// sign-in method the deployment has, and the server mints the long-lived
+// `client: "cli"` token once the signed-in user approves.
+//
+// Two shapes, picked by whether a browser can reach this machine.
+//
+// Loopback (the default). We bind 127.0.0.1 first, tell the server which
+// port, and keep a verifier whose SHA-256 the server stores. The browser is
+// sent back to that port with a one-time code. A remote attacker cannot
+// receive a redirect to our loopback address, so the token binds to this
+// machine without anyone judging anything. RFC 8252 §8.10 notes another
+// local program can sometimes read the loopback response; it still cannot
+// use the code, because the verifier never leaves this process.
+//
+// Device (--no-browser, or when no browser opens). The server issues two
+// values. The long one stays here and never appears in a URL or on screen.
+// The short one is printed for the person to type into a page they opened
+// themselves - so there is no link to send, and the one-click approval
+// attack has nothing to click.
 
 /// Matches the server's CliAuthRequest::TTL (5 minutes) plus slack: the
 /// normal end is the server answering 404 once the request expires, this
@@ -24,11 +37,124 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(360);
 /// Well under the claim endpoint's 60/minute rate-limit bucket.
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 
-pub(crate) fn login_via_browser(config: &Config) {
-    let nonce = random_nonce();
-    let client = ApiClient::new(config.api_url().to_string(), None);
-    let body = mailbox_body(&nonce);
+pub(crate) fn login_via_browser(config: &Config, no_browser: bool) {
+    if no_browser {
+        login_via_device(config);
+        return;
+    }
 
+    // Bound before registering: the server needs the real port, and the OS
+    // only names it once the socket exists.
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(e) => {
+            eprintln!("Could not listen on 127.0.0.1 for the sign-in reply ({e}).");
+            eprintln!("Falling back to the code you type in yourself.");
+            login_via_device(config);
+            return;
+        }
+    };
+    let port = match listener.local_addr() {
+        Ok(addr) => addr.port(),
+        Err(e) => {
+            eprintln!("Could not read the local sign-in port ({e}).");
+            login_via_device(config);
+            return;
+        }
+    };
+
+    let verifier = random_secret();
+    let challenge = challenge_for(&verifier);
+    let client = ApiClient::new(config.api_url().to_string(), None);
+
+    let response = register(
+        config,
+        &client,
+        &format!(
+            r#"{{"data":{{"type":"cli_auth_requests","attributes":{{"kind":"loopback","client":"cli","code_challenge":"{challenge}","redirect_port":{port}}}}}}}"#
+        ),
+    );
+    let request_id = match string_attribute(&response, "request_id") {
+        Some(id) => id,
+        None => {
+            eprintln!("The server accepted the sign-in but named no request to approve.");
+            std::process::exit(1);
+        }
+    };
+
+    let web_url = resolve_web_url(config, &response);
+    // The request id is not a secret - it selects a row and nothing more, so
+    // it is safe in an address bar, a browser history, or an error report.
+    // Only the verifier, which stays in this process, can claim the token.
+    let url = format!("{web_url}/login?app=cli&request={request_id}");
+    if !open_browser(&url) {
+        eprintln!("Falling back to the code you type in yourself.");
+        login_via_device(config);
+        return;
+    }
+    println!("Waiting for you to finish signing in... (press Ctrl+C to cancel)");
+
+    let code = match wait_for_code(listener) {
+        Some(code) => code,
+        None => {
+            eprintln!("The browser never came back with a sign-in reply.");
+            std::process::exit(1);
+        }
+    };
+
+    let body = zeroize::Zeroizing::new(format!(
+        r#"{{"data":{{"type":"cli_auth_requests","attributes":{{"code":"{}","code_verifier":"{}"}}}}}}"#,
+        &*code, &*verifier
+    ));
+    let response = client.raw_post(
+        &format!("{}/cli_auth_requests/claim", config.api_url()),
+        &[("Content-Type", "application/json")],
+        body.as_bytes(),
+    );
+    if !response.is_success() {
+        eprintln!(
+            "The sign-in could not be completed ({}): {}",
+            response.status,
+            response.error_detail()
+        );
+        std::process::exit(1);
+    }
+    auth::login_with_token(config, token_from(&response));
+}
+
+fn login_via_device(config: &Config) {
+    let client = ApiClient::new(config.api_url().to_string(), None);
+    let response = register(
+        config,
+        &client,
+        r#"{"data":{"type":"cli_auth_requests","attributes":{"kind":"device","client":"cli"}}}"#,
+    );
+
+    let device_code = match string_attribute(&response, "device_code") {
+        Some(code) => zeroize::Zeroizing::new(code),
+        None => {
+            eprintln!("This Klaay environment does not offer the type-in sign-in.");
+            std::process::exit(1);
+        }
+    };
+    let user_code = string_attribute(&response, "user_code").unwrap_or_default();
+    let verification_uri = string_attribute(&response, "verification_uri")
+        .unwrap_or_else(|| format!("{}/device", resolve_web_url(config, &response)));
+
+    // Only the short code is printed. The device code above is this
+    // process's secret and never reaches the screen or the scrollback.
+    println!("Open this page in any browser: {verification_uri}");
+    println!("Then type this code: {user_code}");
+    println!("Waiting for you to finish signing in... (press Ctrl+C to cancel)");
+
+    let body = zeroize::Zeroizing::new(format!(
+        r#"{{"data":{{"type":"cli_auth_requests","attributes":{{"device_code":"{}"}}}}}}"#,
+        &*device_code
+    ));
+    auth::login_with_token(config, poll_for_token(config, &client, body.as_bytes()));
+}
+
+fn register(config: &Config, client: &ApiClient, body: &str) -> crate::client::ApiResponse {
     let response = client.raw_post(
         &format!("{}/cli_auth_requests", config.api_url()),
         &[("Content-Type", "application/json")],
@@ -41,98 +167,36 @@ pub(crate) fn login_via_browser(config: &Config) {
             response.error_detail()
         );
         eprintln!(
-            "If this Klaay environment predates CLI sign-in support, use `{} login --email` instead.",
+            "If this Klaay environment predates the current sign-in support, upgrade the server, or ask an administrator for a token and run `{} login --with-token`.",
             crate::config::bin_name()
         );
         std::process::exit(1);
     }
-
-    // The deployment announces its own SPA origin in the register response,
-    // so --api-url alone is sufficient against any Klaay environment - a
-    // staging API must not send the user to production's login page. An
-    // explicit --web-url/KLAAY_WEB_URL still wins; the built-in default only
-    // applies against older servers that don't announce one.
-    let server_web_url = response
-        .body()
-        .and_then(|b| b.get("data"))
-        .and_then(|d| d.get("attributes"))
-        .and_then(|a| a.get("web_url"))
-        .and_then(|w| w.as_str())
-        .map(|w| w.trim_end_matches('/').to_string());
-    let web_url = match (&server_web_url, config.web_url_explicit()) {
-        (Some(announced), false) => {
-            // Held to the same transport standard as the configured URLs -
-            // the server is trusted for *where* its login page lives, not to
-            // downgrade the plaintext policy.
-            if let Err(e) = config.check_url_security(announced) {
-                eprintln!("The server announced a sign-in page URL that can't be used: {e}");
-                std::process::exit(1);
-            }
-            announced.as_str()
-        }
-        _ => config.web_url(),
-    };
-    if server_web_url.is_none() && !config.web_url_explicit() {
-        // Older server: it accepted the request but can't say where its web
-        // app lives, so the built-in default is a guess worth flagging.
-        eprintln!(
-            "Note: this server doesn't announce its sign-in page; opening {web_url} - pass --web-url if that's the wrong web app for {}.",
-            config.api_url()
-        );
+    // The server says when a path it still serves is on its way out, so the
+    // next cut-over needs no guesswork here.
+    if let Some(warning) = string_attribute(&response, "deprecation_warning") {
+        eprintln!("Warning: {warning}");
     }
+    response
+}
 
-    // The nonce is base64url (verified by construction in `random_nonce`),
-    // so embedding it in a query string needs no percent-encoding.
-    let url = format!("{}/login?app=cli&state={}", web_url, &*nonce);
-    open_browser(&url);
-    // The first segment doubles as a phishing check: the consent page shows
-    // the same code, so the user can confirm the approval they're looking at
-    // belongs to this terminal. Only 6 of 22 chars - the remaining 16 keep
-    // ~96 bits of entropy out of terminal scrollback.
-    // Char-based, not a byte slice - can't panic on a boundary, and unlike a
-    // `get(..6).unwrap_or(&nonce)` fallback it can never print the whole
-    // nonce (the mailbox's bearer secret) to the terminal.
-    let verification_code: String = nonce.chars().take(6).collect();
-    println!("Verification code: {verification_code}");
-    println!("Waiting for you to finish signing in... (press Ctrl+C to cancel)");
-
+fn poll_for_token(config: &Config, client: &ApiClient, body: &[u8]) -> zeroize::Zeroizing<String> {
     let claim_url = format!("{}/cli_auth_requests/claim", config.api_url());
     let deadline = Instant::now() + LOGIN_TIMEOUT;
-    let token = loop {
+    loop {
         if Instant::now() >= deadline {
             eprintln!("Timed out waiting for the browser sign-in.");
             std::process::exit(1);
         }
         std::thread::sleep(POLL_INTERVAL);
 
-        let response = client.raw_post(
-            &claim_url,
-            &[("Content-Type", "application/json")],
-            body.as_bytes(),
-        );
+        let response = client.raw_post(&claim_url, &[("Content-Type", "application/json")], body);
         match response.status {
             // Registered but not yet approved - keep waiting.
             202 => continue,
-            200 => {
-                let token = response
-                    .body()
-                    .and_then(|b| b.get("data"))
-                    .and_then(|d| d.get("attributes"))
-                    .and_then(|a| a.get("token"))
-                    .and_then(|t| t.as_str())
-                    .map(|t| zeroize::Zeroizing::new(t.to_string()));
-                match token {
-                    Some(token) => break token,
-                    None => {
-                        eprintln!(
-                            "The sign-in completed but the server's response carried no token."
-                        );
-                        std::process::exit(1);
-                    }
-                }
-            }
+            200 => return token_from(&response),
             // The request expired or was already claimed - either way this
-            // nonce is spent.
+            // request is spent.
             404 => {
                 eprintln!(
                     "The sign-in request expired or was already used - run `{} login` again.",
@@ -154,55 +218,131 @@ pub(crate) fn login_via_browser(config: &Config) {
                 std::process::exit(1);
             }
         }
-    };
-
-    auth::login_with_token(config, token);
+    }
 }
 
-/// 16 random bytes, base64url-encoded to 22 characters - the mailbox's
-/// bearer secret. `Zeroizing` like every other credential-shaped value in
-/// this crate: anyone holding the nonce can claim the minted token during
-/// the request's 5-minute lifetime.
-fn random_nonce() -> zeroize::Zeroizing<String> {
-    let mut bytes = [0u8; 16];
-    // Unrecoverable: without OS randomness there is no safe nonce to offer.
+fn token_from(response: &crate::client::ApiResponse) -> zeroize::Zeroizing<String> {
+    match string_attribute(response, "token") {
+        Some(token) => zeroize::Zeroizing::new(token),
+        None => {
+            eprintln!("The sign-in completed but the server's response carried no token.");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn string_attribute(response: &crate::client::ApiResponse, name: &str) -> Option<String> {
+    response
+        .body()
+        .and_then(|b| b.get("data"))
+        .and_then(|d| d.get("attributes"))
+        .and_then(|a| a.get(name))
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string())
+}
+
+/// The deployment announces its own SPA origin, so `--api-url` alone is
+/// enough against any Klaay environment - a staging API must not send the
+/// user to production's login page. An explicit `--web-url`/`KLAAY_WEB_URL`
+/// still wins; the built-in default only applies against older servers that
+/// announce nothing.
+fn resolve_web_url(config: &Config, response: &crate::client::ApiResponse) -> String {
+    let announced =
+        string_attribute(response, "web_url").map(|w| w.trim_end_matches('/').to_string());
+    match (&announced, config.web_url_explicit()) {
+        (Some(announced), false) => {
+            // Held to the same transport standard as the configured URLs -
+            // the server is trusted for *where* its login page lives, not to
+            // downgrade the plaintext policy.
+            if let Err(e) = config.check_url_security(announced) {
+                eprintln!("The server announced a sign-in page URL that can't be used: {e}");
+                std::process::exit(1);
+            }
+            announced.clone()
+        }
+        _ => {
+            if announced.is_none() && !config.web_url_explicit() {
+                eprintln!(
+                    "Note: this server doesn't announce its sign-in page; opening {} - pass --web-url if that's the wrong web app for {}.",
+                    config.web_url(),
+                    config.api_url()
+                );
+            }
+            config.web_url().to_string()
+        }
+    }
+}
+
+/// Serves exactly one request, answers with a page telling the person they
+/// can close the tab, and returns the code the browser carried. No HTTP
+/// server dependency: one request line is all this has to understand.
+fn wait_for_code(listener: TcpListener) -> Option<zeroize::Zeroizing<String>> {
+    let stream = listener.incoming().next()?.ok()?;
+    let mut reader = BufReader::new(stream);
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line).ok()?;
+
+    let code = code_from_request_line(&request_line);
+    let page = match &code {
+        Some(_) => "<!doctype html><meta charset=utf-8><title>Signed in</title><p>You are signed in. You can close this window and go back to your terminal.",
+        None => "<!doctype html><meta charset=utf-8><title>Sign-in failed</title><p>That reply carried no sign-in code. Go back to your terminal and run the command again.",
+    };
+    let stream = reader.get_mut();
+    let _ = write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}",
+        page.len()
+    );
+    let _ = stream.flush();
+    code
+}
+
+/// Pulls `code` out of `GET /?code=…&… HTTP/1.1`. Percent-decoding is not
+/// needed - the server mints a base64url code - but a `+` is decoded because
+/// some clients still encode a query that way.
+fn code_from_request_line(line: &str) -> Option<zeroize::Zeroizing<String>> {
+    let target = line.split_whitespace().nth(1)?;
+    let query = target.split_once('?')?.1;
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == "code")
+        .map(|(_, value)| zeroize::Zeroizing::new(value.replace('+', " ")))
+        .filter(|code| !code.is_empty())
+}
+
+/// 32 random bytes, base64url-encoded - the PKCE verifier. `Zeroizing` like
+/// every other credential-shaped value in this crate: it is the only thing
+/// standing between a leaked code and a minted token.
+fn random_secret() -> zeroize::Zeroizing<String> {
+    let mut bytes = [0u8; 32];
+    // Unrecoverable: without OS randomness there is no safe secret to offer.
     getrandom::fill(&mut bytes).unwrap_or_else(|e| {
-        eprintln!("Could not obtain OS randomness for the sign-in nonce: {e}");
+        eprintln!("Could not obtain OS randomness for the sign-in secret: {e}");
         std::process::exit(1);
     });
     zeroize::Zeroizing::new(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 
-/// The register and claim bodies are identical: the nonce is the only
-/// parameter either endpoint takes. Hand-built (mirroring auth.rs's
-/// `build_secret_auth_body` convention for credential-carrying bodies)
-/// rather than routed through a `serde_json::Value` the nonce would sit in
-/// unzeroized; safe to embed verbatim since the nonce is base64url by
-/// construction - no JSON-special characters.
-fn mailbox_body(nonce: &str) -> zeroize::Zeroizing<String> {
-    zeroize::Zeroizing::new(format!(
-        r#"{{"data":{{"type":"cli_auth_requests","attributes":{{"nonce":"{nonce}"}}}}}}"#
-    ))
+/// S256, the only challenge method this flow offers: the server stores this
+/// and can prove nothing from it, because a hash cannot be run backwards.
+fn challenge_for(verifier: &str) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
 /// Uses the `open` crate rather than hand-rolled per-OS `Command`
 /// invocations - it calls the platform's native launch API (e.g.
 /// `ShellExecute` on Windows) directly instead of going through a shell,
 /// so URL query characters can't be reinterpreted as shell syntax.
-fn open_browser(url: &str) {
+fn open_browser(url: &str) -> bool {
     match open::that(url) {
-        // Doesn't print `url` on success - it carries the nonce in its query
-        // string, which the user doesn't need to see (the browser already
-        // has it) and shouldn't end up in terminal scrollback or CI log
-        // captures. The failure branch below still has to print it - the
-        // user needs the full URL to open it manually.
-        Ok(()) => println!("Opening your browser for sign-in..."),
+        Ok(()) => {
+            println!("Opening your browser for sign-in...");
+            true
+        }
         Err(e) => {
             eprintln!("Could not open a browser automatically ({e}).");
-            eprintln!("Please open the following URL manually: {url}");
-            eprintln!(
-                "Warning: this URL contains a single-use sign-in secret. If it appears in logs or shared terminal history, press Ctrl+C and re-run to get a fresh one."
-            );
+            false
         }
     }
 }
@@ -212,25 +352,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn random_nonce_is_22_base64url_chars() {
-        let nonce = random_nonce();
-        assert_eq!(nonce.len(), 22);
-        assert!(nonce
+    fn random_secret_is_43_base64url_chars() {
+        let secret = random_secret();
+        assert_eq!(secret.len(), 43);
+        assert!(secret
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
     }
 
+    // The one value the server checks against. RFC 7636's own S256 example:
+    // verifier "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk" hashes to this.
     #[test]
-    fn mailbox_body_is_valid_json_with_the_nonce() {
-        let body = mailbox_body("abcDEF123-_x");
-        let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    fn challenge_is_the_rfc_7636_s256_example() {
         assert_eq!(
-            parsed
-                .get("data")
-                .and_then(|d| d.get("attributes"))
-                .and_then(|a| a.get("nonce"))
-                .and_then(|n| n.as_str()),
-            Some("abcDEF123-_x")
+            challenge_for("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
         );
+    }
+
+    #[test]
+    fn challenge_carries_no_padding() {
+        assert!(!challenge_for("anything").contains('='));
+    }
+
+    #[test]
+    fn code_comes_out_of_the_request_line() {
+        assert_eq!(
+            code_from_request_line("GET /?code=abc123 HTTP/1.1\r\n").map(|c| c.to_string()),
+            Some("abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn code_is_found_among_other_parameters() {
+        assert_eq!(
+            code_from_request_line("GET /?state=x&code=abc123&other=y HTTP/1.1\r\n")
+                .map(|c| c.to_string()),
+            Some("abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn a_reply_with_no_code_yields_none() {
+        assert!(code_from_request_line("GET / HTTP/1.1\r\n").is_none());
+        assert!(code_from_request_line("GET /?code= HTTP/1.1\r\n").is_none());
+        assert!(code_from_request_line("garbage\r\n").is_none());
     }
 }

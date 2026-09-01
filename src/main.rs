@@ -101,28 +101,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Log in and store a token. With no flags, opens your browser at the
-    /// Klaay login page (any sign-in method works there); --email switches
-    /// to the email/password prompt.
+    /// Log in and store a token. Opens your browser at the Klaay login page,
+    /// where every sign-in method the deployment offers works.
     #[command(
-        after_help = "Examples: klaay login  |  klaay login --email dev@customer.com  |  klaay login --with-token < token.txt"
+        after_help = "Examples: klaay login  |  klaay login --no-browser  |  klaay login --with-token < token.txt"
     )]
     Login {
+        /// No browser on this machine: print a short code to type into a page
+        /// you open yourself, instead of opening one here.
         #[arg(long)]
-        email: Option<String>,
-        /// Insecure: prefer the interactive prompt - a value passed here can
-        /// end up in shell history, `ps` output, or system audit logs.
-        #[arg(long, requires = "email")]
-        password: Option<String>,
-        /// Account id, if already known - skips the multi-account prompt
-        /// (email/password flow only; the browser flow uses the account your
-        /// web session selects).
-        #[arg(long, requires = "email")]
-        account: Option<String>,
+        no_browser: bool,
         /// Read an already-minted token from stdin instead of signing in -
-        /// for SSH sessions and CI, where the browser flow can't reach this
-        /// machine.
-        #[arg(long, conflicts_with_all = ["email", "password", "account"])]
+        /// for CI, where no browser reaches this machine and the operator
+        /// already holds a credential.
+        #[arg(long, conflicts_with = "no_browser")]
         with_token: bool,
     },
     /// Clear the stored token.
@@ -336,32 +328,18 @@ fn main() {
 
     match cli.command {
         Commands::Login {
-            email,
-            password,
-            account,
+            no_browser,
             with_token,
         } => {
-            // Wrapped immediately at the destructure site rather than left
-            // as a plain `Option<String>` until `auth::login` wraps it - this
-            // protects the entire lifetime of the string's one heap
-            // allocation (moves never clone the backing buffer), covering
-            // the branch checks below too.
-            let password = password.map(zeroize::Zeroizing::new);
-            // Same reasoning as `password` above - the email address is PII.
-            let email = email.map(zeroize::Zeroizing::new);
             if with_token {
                 auth::login_with_stdin_token(&config);
-            // No `|| password.is_some()` arm: clap's `requires = "email"`
-            // on --password makes a password-without-email invocation a
-            // parse error before this code runs.
-            } else if email.is_some() {
-                auth::login(&config, email, password, account);
             } else {
-                // The default: borrow the web app's login page (every sign-in
-                // method the deployment supports) via the server-side nonce
-                // mailbox. clap's `requires`/`conflicts_with_all` rules above
-                // guarantee `account` is None on this branch.
-                web_login::login_via_browser(&config);
+                // The default: borrow the web app's login page, so every
+                // sign-in method the deployment supports works here too. The
+                // token comes back through the server-side mailbox, bound
+                // either to this machine's loopback port or to a code the
+                // person types in themselves.
+                web_login::login_via_browser(&config, no_browser);
             }
         }
         Commands::Logout => auth::logout(&config),

@@ -142,6 +142,11 @@ rpassword = "7"
 # two features entirely - with no compile error, just a confusing "no
 # method/derive named ..." far from this file.
 zeroize = { version = "1.9.0", features = ["serde", "derive"] }
+# S256 for the PKCE challenge in web_login.rs. The verifier stays in this
+# process and only its SHA-256 reaches the server, so a code read out of the
+# loopback reply, a browser history, or an error report cannot be exchanged
+# for a token.
+sha2 = "0.11"
 # Opens the sign-in URL in the system browser without going through
 # cmd.exe's own command-line reparsing on Windows (which can reinterpret
 # `%`/`^` inside the URL) - one small, well-established dependency instead
