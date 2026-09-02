@@ -180,6 +180,35 @@ fn register(config: &Config, client: &ApiClient, body: &str) -> crate::client::A
     response
 }
 
+/// What one claim response tells the poll loop to do next.
+#[derive(Debug, PartialEq, Eq)]
+enum PollStep {
+    /// Registered, nobody has approved it yet.
+    Wait,
+    /// The token is here.
+    Done,
+    /// Expired or already claimed - this request is spent.
+    Spent,
+    /// Transient. Wait a full extra interval, then ask again.
+    BackOff,
+    /// The server refused in a way waiting cannot fix.
+    Fail,
+}
+
+/// A rate limit and a server fault are both transient, so both back off. The
+/// deadline bounds the wait, so a blip must not end a sign-in the person is
+/// part-way through.
+fn poll_step(status: u16) -> PollStep {
+    match status {
+        200 => PollStep::Done,
+        202 => PollStep::Wait,
+        404 => PollStep::Spent,
+        429 => PollStep::BackOff,
+        500..=599 => PollStep::BackOff,
+        _ => PollStep::Fail,
+    }
+}
+
 fn poll_for_token(config: &Config, client: &ApiClient, body: &[u8]) -> zeroize::Zeroizing<String> {
     let claim_url = format!("{}/cli_auth_requests/claim", config.api_url());
     let deadline = Instant::now() + LOGIN_TIMEOUT;
@@ -191,28 +220,24 @@ fn poll_for_token(config: &Config, client: &ApiClient, body: &[u8]) -> zeroize::
         std::thread::sleep(POLL_INTERVAL);
 
         let response = client.raw_post(&claim_url, &[("Content-Type", "application/json")], body);
-        match response.status {
-            // Registered but not yet approved - keep waiting.
-            202 => continue,
-            200 => return token_from(&response),
-            // The request expired or was already claimed - either way this
-            // request is spent.
-            404 => {
+        match poll_step(response.status) {
+            PollStep::Wait => continue,
+            PollStep::Done => return token_from(&response),
+            PollStep::Spent => {
                 eprintln!(
                     "The sign-in request expired or was already used - run `{} login` again.",
                     crate::config::bin_name()
                 );
                 std::process::exit(1);
             }
-            // Rate-limited: back off a full extra interval and retry rather
-            // than failing a sign-in the user is mid-way through.
-            429 => {
+            PollStep::BackOff => {
                 std::thread::sleep(POLL_INTERVAL);
                 continue;
             }
-            status => {
+            PollStep::Fail => {
                 eprintln!(
-                    "Sign-in polling failed ({status}): {}",
+                    "Sign-in polling failed ({}): {}",
+                    response.status,
                     response.error_detail()
                 );
                 std::process::exit(1);
@@ -350,6 +375,30 @@ fn open_browser(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A server blip must not end a sign-in the person is part-way through.
+    // The deadline bounds the wait, so backing off costs nothing.
+    #[test]
+    fn a_server_error_backs_off_instead_of_ending_the_sign_in() {
+        assert_eq!(poll_step(500), PollStep::BackOff);
+        assert_eq!(poll_step(502), PollStep::BackOff);
+        assert_eq!(poll_step(503), PollStep::BackOff);
+        assert_eq!(poll_step(504), PollStep::BackOff);
+    }
+
+    #[test]
+    fn poll_step_reads_the_settled_answers() {
+        assert_eq!(poll_step(200), PollStep::Done);
+        assert_eq!(poll_step(202), PollStep::Wait);
+        assert_eq!(poll_step(404), PollStep::Spent);
+        assert_eq!(poll_step(429), PollStep::BackOff);
+    }
+
+    #[test]
+    fn a_client_error_ends_the_sign_in() {
+        assert_eq!(poll_step(400), PollStep::Fail);
+        assert_eq!(poll_step(403), PollStep::Fail);
+    }
 
     #[test]
     fn random_secret_is_43_base64url_chars() {
