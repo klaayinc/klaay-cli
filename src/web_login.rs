@@ -37,6 +37,13 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(360);
 /// Well under the claim endpoint's 60/minute rate-limit bucket.
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 
+/// Nobody remote can receive a redirect here, so the token binds to this
+/// machine. Named so a test can assert the address this code binds, not one
+/// the test binds itself.
+fn bind_loopback() -> std::io::Result<TcpListener> {
+    TcpListener::bind("127.0.0.1:0")
+}
+
 pub(crate) fn login_via_browser(config: &Config, no_browser: bool) {
     if no_browser {
         login_via_device(config);
@@ -45,7 +52,7 @@ pub(crate) fn login_via_browser(config: &Config, no_browser: bool) {
 
     // Bound before registering: the server needs the real port, and the OS
     // only names it once the socket exists.
-    let listener = match TcpListener::bind("127.0.0.1:0") {
+    let listener = match bind_loopback() {
         Ok(listener) => listener,
         Err(e) => {
             eprintln!("Could not listen on 127.0.0.1 for the sign-in reply ({e}).");
@@ -375,6 +382,15 @@ fn open_browser(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The whole security argument lives in this address: a remote attacker
+    // cannot receive the sign-in code. This calls the function
+    // `login_via_browser` uses, so widening that address fails here.
+    #[test]
+    fn the_sign_in_listener_is_loopback_only() {
+        let addr = bind_loopback().expect("bind").local_addr().expect("addr");
+        assert!(addr.ip().is_loopback());
+    }
 
     // A server blip must not end a sign-in the person is part-way through.
     // The deadline bounds the wait, so backing off costs nothing.
