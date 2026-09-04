@@ -74,7 +74,7 @@ when sources changed, runs your command, and returns to the prompt — it does
 not hold the terminal:
 
 ```
-bin/dev-cli login --email dev@example.com
+bin/dev-cli login
 bin/dev-cli list selected_controls --page-size 5
 ```
 
@@ -98,20 +98,23 @@ Opens your browser at the Klaay login page — sign in with whatever method
 your deployment supports (password, Google, Microsoft), approve the CLI on
 the consent screen (it shows the same verification code the terminal
 printed), and the CLI picks up its token automatically. No OAuth client
-registration or provider configuration needed; the handoff goes through the
-server, so it works even when the browser runs on a different machine than
-the CLI. Prefer the terminal instead:
+registration or provider configuration needed. The CLI listens on
+`127.0.0.1` and the browser is sent back there with a one-time code, so the
+token binds to this machine: a sign-in someone else started cannot land here.
+
+On a machine with no browser — an SSH session, a container — ask for the
+type-in flow instead:
 
 ```
-klaay login --email you@company.com
+klaay login --no-browser
 ```
 
-Prompts for your password (or pass `--password`). If you belong to more than
-one Klaay account, you'll be shown the list and prompted to pick one — or
-pass `--account <id>` upfront if you already know it.
+That prints a short code and an address. Open the address in any browser you
+like and type the code. Nothing is sent to you to click, and the long secret
+never leaves your terminal.
 
-For CI, or an SSH session where no browser can complete the handoff, pipe an
-already-minted token in:
+For CI, where the operator already holds a credential, pipe a minted token
+in:
 
 ```
 klaay login --with-token < token.txt
@@ -128,7 +131,7 @@ Point at a non-default environment (e.g. local dev) with `--api-url` /
 
 | Command | What it does |
 |---|---|
-| `klaay login` | Authenticate and store a token (browser sign-in, `--email`, or `--with-token`) |
+| `klaay login` | Authenticate and store a token (browser sign-in, `--no-browser`, or `--with-token`) |
 | `klaay logout` | Clear the stored token |
 | `klaay whoami` | Show the current session (calls `GET /me`) |
 | `klaay resources` | List every resource type, derived from `GET /openapi` |
