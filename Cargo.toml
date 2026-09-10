@@ -84,7 +84,7 @@ md-5 = "0.11"
 # `cargo tree` that nothing else in this crate's dependency graph pulls in a
 # different `dirs` major, so there's no duplicate-version compilation/binary-
 # size concern from choosing v6 over v5 here.
-dirs = "6"
+dirs = "7"
 rpassword = "7"
 # Already present transitively (via other deps); declared directly so
 # credentials (password, id_token, the stored bearer token) can be zeroized
