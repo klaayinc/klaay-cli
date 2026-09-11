@@ -729,6 +729,15 @@ fn relationships_from_blobs(blobs: &[(String, String)]) -> Value {
         .into_iter()
         .map(|(relationship, mut refs)| {
             let data = if KNOWN_HAS_ONE_RELATIONSHIPS.contains(&relationship) {
+                // `assert_eq!`, not `debug_assert_eq!` - a skipped
+                // `check_file_flags` must fail in release builds too, not
+                // drop the extra blobs unattached (see `set_type` in main.rs).
+                assert_eq!(
+                    refs.len(),
+                    1,
+                    "has_one {relationship} got {} blobs",
+                    refs.len()
+                );
                 refs.remove(0)
             } else {
                 Value::Array(refs)
@@ -936,6 +945,15 @@ mod tests {
                 "{slot} must carry a single object under data"
             );
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "has_one soc2_report got 2 blobs")]
+    fn relationships_from_blobs_panics_on_two_blobs_for_a_has_one_slot() {
+        relationships_from_blobs(&pairs(&[
+            ("soc2_report", "signed-1"),
+            ("soc2_report", "signed-2"),
+        ]));
     }
 
     #[test]
