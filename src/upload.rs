@@ -652,28 +652,28 @@ pub(crate) fn direct_upload(
 }
 
 /// Every `has_one_attached` relationship name across the app (confirmed
-/// directly via grep of every model, not guessed) - JSON:API expects a
-/// single object in `data` for these, not the has-many array this function
-/// builds for everything else. Rather than silently sending a malformed
-/// `"data": [...]` the server would reject anyway, a `--file` targeting one
-/// of these exits with a clear message up front.
+/// directly via grep of every model, not guessed). JSON:API expects a single
+/// object in `data` for these, and the API's OpenAPI spec types each one as
+/// a nullable object - so `relationships_from_blobs` sends one object, and
+/// `check_file_flags` rejects a second `--file` for the same name.
 ///
 /// No mechanism keeps this in sync with the server if a new
 /// `has_one_attached` is added there later - a missing entry would silently
-/// send the malformed array shape (rejected only after the file has already
-/// been uploaded to blob storage, orphaning it). When adding a new
-/// attachment, check these model files directly rather than assuming this
-/// list is exhaustive:
+/// send the array shape (rejected only after the file has already been
+/// uploaded to blob storage, orphaning it). When adding a new attachment,
+/// check these model files directly rather than assuming this list is
+/// exhaustive:
 /// - `app/models/account.rb` (`logo`)
+/// - `app/models/framework.rb` (`logo`)
 /// - `app/models/user_import.rb` (`source`)
 /// - `app/models/predefined_vendor.rb` (`icon`)
 /// - `app/models/evidence_run_export.rb` (`export`)
 /// - `app/models/vendor.rb` (`icon`, `data_agreement`, `soc2_report`,
-///   `iso27001_report`, `security_questionnaire`, `privacy_policy_document`,
-///   `terms_of_use_document`)
+///   `iso27001_report`, `hipaa_certificate`, `security_questionnaire`,
+///   `privacy_policy_document`, `terms_of_use_document`)
 ///
-/// Verified complete as of this writing via `grep -rl has_one_attached
-/// app/models/` (five model files above, plus the `has_one_attached` method
+/// Verified complete as of this writing via `git grep has_one_attached
+/// app/models/` (six model files above, plus the `has_one_attached` method
 /// definition itself inside `app/models/concerns/attachments.rb` - not a
 /// real attachment). Models with attachment-like names that are deliberately
 /// absent because they use `has_many_attached` instead (a real has-many
@@ -688,81 +688,76 @@ const KNOWN_HAS_ONE_RELATIONSHIPS: &[&str] = &[
     "data_agreement",
     "soc2_report",
     "iso27001_report",
+    "hipaa_certificate",
     "security_questionnaire",
     "privacy_policy_document",
     "terms_of_use_document",
 ];
 
-/// Parses a repeatable `--file <relationship>=<path>` flag and merges the
-/// resulting active_storage_blobs relationship(s) into a JSON:API relationships
-/// object. Multiple files for the same relationship key become a has-many
-/// array; a single file also uses array form, matching every attachment this
-/// plan verified directly (CollectedEvidence#files, Vendor#documents, etc. are
-/// all has_many_attached) - a true has_one target is rejected explicitly
-/// above rather than sent as a malformed array.
-pub(crate) fn build_relationships(
-    client: &ApiClient,
-    file_flags: &[(String, String)],
-    force_insecure: bool,
-) -> Value {
+/// Checks a whole `--file` batch before the first upload starts, so a bad
+/// batch never leaves an orphaned blob in ActiveStorage.
+fn check_file_flags(file_flags: &[(String, String)]) -> Result<(), String> {
+    for relationship in KNOWN_HAS_ONE_RELATIONSHIPS {
+        let count = file_flags.iter().filter(|(r, _)| r == relationship).count();
+        if count > 1 {
+            return Err(format!(
+                "Error: \"{relationship}\" is a single-file (has_one) attachment and takes only one file, but --file {relationship}=<path> appears {count} times. Pass it once."
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Builds the JSON:API relationships object from `(relationship, signed_id)`
+/// pairs. A has_one relationship gets a single object under `data`; any
+/// other relationship gets an array. Expects `check_file_flags` to have
+/// passed, so a has_one relationship has exactly one blob.
+fn relationships_from_blobs(blobs: &[(String, String)]) -> Value {
     // BTreeMap (not HashMap) - HashMap's iteration order is randomized per
     // process, so the same --file flags could serialize their relationships
     // in a different order run to run. JSON:API servers don't care about key
     // order, but a stable order still matters for anything that diffs or
     // snapshots the serialized request (logs, tests, tooling).
-    let mut grouped: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-    // Counted explicitly rather than relied upon via the loop's own index -
-    // `direct_upload` never returns on failure (it always
-    // `std::process::exit(1)`s), so today this always equals the loop index
-    // at each point anyway, but incrementing it only after a real success
-    // means this stays correct even if `direct_upload` is ever changed to
-    // return a `Result` instead of exiting - no implicit invariant for a
-    // future change to silently break.
-    let mut successes = 0usize;
-    // clippy's explicit_counter_loop suggests `.enumerate()` here, but that's
-    // exactly the coupling this counter exists to avoid - see the comment
-    // above. `successes` is incremented after `direct_upload` returns, not
-    // derived from the loop position, even though the two happen to match
-    // today.
-    #[expect(
-        clippy::explicit_counter_loop,
-        reason = "successes must only increment after a confirmed direct_upload return, not at the loop index boundary"
-    )]
-    for (relationship, path_str) in file_flags {
-        // A plain slice scan, not a `HashSet` built once outside this loop -
-        // a prior version of this code built the set specifically to make
-        // lookups here "O(1)", but `KNOWN_HAS_ONE_RELATIONSHIPS` is a fixed
-        // 10-entry compile-time constant, so scanning it is already O(1) in
-        // the only variable that matters here (the number of `--file` flags,
-        // m): the two approaches are the same O(m) asymptotic class either
-        // way, since building a HashSet from those same 10 entries is itself
-        // O(1). A `HashSet`'s allocation would be pure overhead for no
-        // asymptotic benefit, not a tradeoff against a bigger-O scan.
-        if KNOWN_HAS_ONE_RELATIONSHIPS.contains(&relationship.as_str()) {
-            fail(
-                successes,
-                format_args!(
-                    "Error: \"{relationship}\" is a single-file (has_one) attachment - it needs a single object, not the array this generic --file path builds. Not yet supported; ask for it if you need it."
-                ),
-            );
-        }
-        let path = Path::new(path_str);
-        let signed_id = direct_upload(client, path, successes, force_insecure);
-        successes += 1;
-        grouped
-            .entry(relationship.clone())
-            .or_default()
-            .push(json!({
-                "type": "active_storage_blobs",
-                "id": signed_id,
-            }));
+    let mut grouped: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
+    for (relationship, signed_id) in blobs {
+        grouped.entry(relationship).or_default().push(json!({
+            "type": "active_storage_blobs",
+            "id": signed_id,
+        }));
     }
-
-    let mut relationships = serde_json::Map::new();
-    for (relationship, refs) in grouped {
-        relationships.insert(relationship, json!({ "data": refs }));
-    }
+    let relationships = grouped
+        .into_iter()
+        .map(|(relationship, mut refs)| {
+            let data = if KNOWN_HAS_ONE_RELATIONSHIPS.contains(&relationship) {
+                refs.remove(0)
+            } else {
+                Value::Array(refs)
+            };
+            (relationship.to_string(), json!({ "data": data }))
+        })
+        .collect();
     Value::Object(relationships)
+}
+
+/// Uploads each `--file <relationship>=<path>` through the ActiveStorage
+/// direct-upload flow, then returns the JSON:API relationships object that
+/// attaches the resulting blobs.
+pub(crate) fn build_relationships(
+    client: &ApiClient,
+    file_flags: &[(String, String)],
+    force_insecure: bool,
+) -> Value {
+    if let Err(message) = check_file_flags(file_flags) {
+        fail(0, message);
+    }
+    let mut blobs: Vec<(String, String)> = Vec::with_capacity(file_flags.len());
+    for (relationship, path_str) in file_flags {
+        // `blobs.len()` counts only uploads that returned, so it is the
+        // number of blobs a failure here leaves orphaned.
+        let signed_id = direct_upload(client, Path::new(path_str), blobs.len(), force_insecure);
+        blobs.push((relationship.clone(), signed_id));
+    }
+    relationships_from_blobs(&blobs)
 }
 
 #[cfg(test)]
@@ -880,6 +875,99 @@ mod tests {
                 "https://8.8.8.8/direct_upload"
             )),
             None
+        );
+    }
+
+    /// Every `has_one_attached` file slot on Kiln's `Vendor` model.
+    const VENDOR_HAS_ONE_SLOTS: &[&str] = &[
+        "soc2_report",
+        "data_agreement",
+        "iso27001_report",
+        "hipaa_certificate",
+        "icon",
+        "privacy_policy_document",
+        "terms_of_use_document",
+        "security_questionnaire",
+    ];
+
+    fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
+        items
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn check_file_flags_accepts_one_file_for_each_vendor_has_one_slot() {
+        for slot in VENDOR_HAS_ONE_SLOTS {
+            assert_eq!(
+                check_file_flags(&pairs(&[(slot, "./report.pdf")])),
+                Ok(()),
+                "--file {slot}=<path> must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn check_file_flags_rejects_a_second_file_for_a_has_one_slot() {
+        let error = check_file_flags(&pairs(&[
+            ("soc2_report", "./a.pdf"),
+            ("soc2_report", "./b.pdf"),
+        ]))
+        .expect_err("two files for a has_one slot must be rejected");
+        assert!(error.contains("\"soc2_report\""), "{error}");
+        assert!(error.contains("only one file"), "{error}");
+    }
+
+    #[test]
+    fn check_file_flags_accepts_many_files_for_a_has_many_slot() {
+        assert_eq!(
+            check_file_flags(&pairs(&[("files", "./a.pdf"), ("files", "./b.pdf")])),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn relationships_from_blobs_sends_a_single_object_for_each_vendor_has_one_slot() {
+        for slot in VENDOR_HAS_ONE_SLOTS {
+            assert_eq!(
+                relationships_from_blobs(&pairs(&[(slot, "signed-1")])),
+                json!({ *slot: { "data": { "type": "active_storage_blobs", "id": "signed-1" } } }),
+                "{slot} must carry a single object under data"
+            );
+        }
+    }
+
+    #[test]
+    fn relationships_from_blobs_sends_an_array_for_a_has_many_slot() {
+        assert_eq!(
+            relationships_from_blobs(&pairs(&[("files", "signed-1")])),
+            json!({ "files": { "data": [
+                { "type": "active_storage_blobs", "id": "signed-1" }
+            ] } })
+        );
+        assert_eq!(
+            relationships_from_blobs(&pairs(&[("files", "signed-1"), ("files", "signed-2")])),
+            json!({ "files": { "data": [
+                { "type": "active_storage_blobs", "id": "signed-1" },
+                { "type": "active_storage_blobs", "id": "signed-2" }
+            ] } })
+        );
+    }
+
+    #[test]
+    fn relationships_from_blobs_mixes_has_one_and_has_many_slots() {
+        assert_eq!(
+            relationships_from_blobs(&pairs(&[
+                ("soc2_report", "signed-1"),
+                ("documents", "signed-2")
+            ])),
+            json!({
+                "documents": { "data": [
+                    { "type": "active_storage_blobs", "id": "signed-2" }
+                ] },
+                "soc2_report": { "data": { "type": "active_storage_blobs", "id": "signed-1" } }
+            })
         );
     }
 }

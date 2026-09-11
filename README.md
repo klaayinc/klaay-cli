@@ -189,6 +189,14 @@ manual evidence:
 klaay create collected_evidences --file files=./screenshot.png
 ```
 
+A single-file (has_one) slot, such as a vendor's `soc2_report` or
+`data_agreement`, takes one `--file`. The CLI sends it as a single object and
+rejects a second `--file` for the same slot:
+
+```
+klaay update vendors <id> --file soc2_report=./soc2-report.pdf
+```
+
 Linking that evidence to a control is a separate step (there's no direct
 relationship from evidence to a control — only through a join resource):
 
