@@ -46,7 +46,7 @@ newer compiler.
 `http://localhost:5173` unless you set them:
 
 ```bash
-bin/dev-cli login --email dev@example.com
+bin/dev-cli login
 bin/dev-cli list selected_controls --page-size 5
 ```
 
