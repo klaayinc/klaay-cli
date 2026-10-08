@@ -57,4 +57,12 @@ fn removed_account_flag_answers_the_same_way() {
         text.contains("--with-token"),
         "the answer must name the path a script moves to, got: {text}"
     );
+    assert!(
+        text.contains("choose the account in your browser"),
+        "the answer must say where the account is chosen now, got: {text}"
+    );
+    assert!(
+        !text.contains("password"),
+        "--account never carried a password, so the answer must not mention one, got: {text}"
+    );
 }

@@ -843,7 +843,13 @@ fn exit_with_error(message: impl std::fmt::Display) -> ! {
 /// replacement; the lines below do.
 fn exit_removed_login_flag(flag: &str) -> ! {
     let bin = config::bin_name();
-    eprintln!("`{flag}` is gone: this CLI no longer handles your password.");
+    // `--account` picked the account up front and never carried a password,
+    // so it gets the answer to what changed for it: where the account is chosen.
+    if flag == "--account" {
+        eprintln!("`{flag}` is gone: you choose the account in your browser when you sign in.");
+    } else {
+        eprintln!("`{flag}` is gone: this CLI no longer handles your password.");
+    }
     eprintln!("Run `{bin} login` to sign in through your browser.");
     eprintln!("Run `{bin} login --no-browser` where no browser opens.");
     eprintln!("Run `{bin} login --with-token < token.txt` in a script or in CI.");
