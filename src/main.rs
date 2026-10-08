@@ -116,6 +116,14 @@ enum Commands {
         /// already holds a credential.
         #[arg(long, conflicts_with = "no_browser")]
         with_token: bool,
+        /// Gone with the password path in 0.2.0. Parsed only so the answer can
+        /// name where the workflow moved; `hide` keeps it out of `--help`.
+        #[arg(long, hide = true, value_name = "EMAIL")]
+        email: Option<String>,
+        #[arg(long, hide = true, value_name = "PASSWORD")]
+        password: Option<String>,
+        #[arg(long, hide = true, value_name = "ACCOUNT")]
+        account: Option<String>,
     },
     /// Clear the stored token.
     Logout,
@@ -330,7 +338,20 @@ fn main() {
         Commands::Login {
             no_browser,
             with_token,
+            email,
+            password,
+            account,
         } => {
+            if let Some(flag) = [
+                ("--email", email.is_some()),
+                ("--password", password.is_some()),
+                ("--account", account.is_some()),
+            ]
+            .into_iter()
+            .find_map(|(name, given)| given.then_some(name))
+            {
+                exit_removed_login_flag(flag);
+            }
             if with_token {
                 auth::login_with_stdin_token(&config);
             } else {
@@ -814,6 +835,27 @@ fn warn_if_orphaned_upload(response: &client::ApiResponse, uploads_completed: bo
 fn exit_with_error(message: impl std::fmt::Display) -> ! {
     eprintln!("{message}");
     std::process::exit(1);
+}
+
+/// 0.1.0's README taught `klaay login --email you@company.com`, and 0.2.0 is
+/// the first stable release without it, so a script meets this on upgrade.
+/// Clap answers an unknown flag with the usage line alone, which names no
+/// replacement; the lines below do.
+fn exit_removed_login_flag(flag: &str) -> ! {
+    let bin = config::bin_name();
+    // `--account` picked the account up front and never carried a password,
+    // so it gets the answer to what changed for it: where the account is chosen.
+    if flag == "--account" {
+        eprintln!("`{flag}` is gone: you choose the account in your browser when you sign in.");
+    } else {
+        eprintln!("`{flag}` is gone: this CLI no longer handles your password.");
+    }
+    eprintln!("Run `{bin} login` to sign in through your browser.");
+    eprintln!("Run `{bin} login --no-browser` where no browser opens.");
+    eprintln!("Run `{bin} login --with-token < token.txt` in a script or in CI.");
+    // Clap answers an unknown flag with 2, so a script that already handles
+    // this failure keeps the exit code it had before the flag was parsed.
+    std::process::exit(2);
 }
 
 #[cfg(test)]
