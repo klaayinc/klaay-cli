@@ -79,12 +79,11 @@ md-5 = "0.11"
 # local users, though the "klaay" directory's *name* could still be visible
 # to anyone who can list that unusual parent.
 #
-# v6, not v5 - simply the current major at the time this dependency was
-# added, no specific v5 incompatibility being worked around. Confirmed via
-# `cargo tree` that nothing else in this crate's dependency graph pulls in a
-# different `dirs` major, so there's no duplicate-version compilation/binary-
-# size concern from choosing v6 over v5 here.
-dirs = "6"
+# v7, the current major. The move from v6 needed no code change: this crate
+# calls only `config_dir()`. `cargo tree -i dirs` shows that nothing else in
+# the dependency graph pulls in a different `dirs` major, so the binary
+# compiles one copy only.
+dirs = "7"
 rpassword = "7"
 # Already present transitively (via other deps); declared directly so
 # credentials (password, id_token, the stored bearer token) can be zeroized
