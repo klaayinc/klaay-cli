@@ -111,7 +111,7 @@ pub(crate) fn login_via_browser(config: &Config, no_browser: bool) {
 
     let body = zeroize::Zeroizing::new(format!(
         r#"{{"data":{{"type":"cli_auth_requests","attributes":{{"code":"{}","code_verifier":"{}"}}}}}}"#,
-        &*code, &*verifier
+        *code, *verifier
     ));
     let response = client.raw_post(
         &format!("{}/cli_auth_requests/claim", config.api_url()),
@@ -156,7 +156,7 @@ fn login_via_device(config: &Config) {
 
     let body = zeroize::Zeroizing::new(format!(
         r#"{{"data":{{"type":"cli_auth_requests","attributes":{{"device_code":"{}"}}}}}}"#,
-        &*device_code
+        *device_code
     ));
     auth::login_with_token(config, poll_for_token(config, &client, body.as_bytes()));
 }

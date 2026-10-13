@@ -199,9 +199,9 @@ fn private_network_rejection_reason_for_parsed_url(parsed: &url::Url) -> Option<
                 Some("a link-local address (this range includes cloud metadata endpoints)")
             } else if v6.is_unique_local() {
                 // Unique local address range (fc00::/7) - `is_unique_local()`
-                // has been stable since Rust 1.71, and rust-toolchain.toml
-                // pins 1.88.0 here, so there's no need for the manual
-                // bitmask this used to be.
+                // has been stable since Rust 1.71, below this crate's
+                // rust-version, so there's no need for the manual bitmask
+                // this used to be.
                 Some("a unique local (private) IPv6 address")
             } else {
                 None

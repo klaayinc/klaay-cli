@@ -36,7 +36,7 @@ cargo build --release
 # binary at target/release/klaay
 ```
 
-The crate declares `rust-version = "1.88"`. Do not add a dependency that needs a
+The crate declares `rust-version = "1.93.1"`. Do not add a dependency that needs a
 newer compiler.
 
 ## Run against a local server
