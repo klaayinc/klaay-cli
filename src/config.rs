@@ -11,6 +11,9 @@ pub(crate) const DEFAULT_API_URL: &str = "https://api.klaay.com";
 // (see web_login.rs). Matches kiln's own default for its SPA origin
 // (config/initializers/cors.rb).
 pub(crate) const DEFAULT_WEB_URL: &str = "https://app.klaay.com";
+// The docs site that serves the API description `resources`/`describe` read. It
+// accepts only a token for DEFAULT_API_URL.
+pub(crate) const DEFAULT_DOCS_URL: &str = "https://docs.klaay.com";
 
 /// The invoked binary's own name, for "run `<this> ...`" hints. Lives here (a
 /// foundational module) rather than in `schema`/`client` so any layer can use
@@ -51,6 +54,8 @@ pub(crate) struct Config {
     // server-announced origin in web_login.rs, but the built-in default
     // yields to it.
     web_url_explicit: bool,
+    // `None` when the user named no docs site (--docs-url or KLAAY_DOCS_URL).
+    docs_url: Option<String>,
     // Stored (not just consumed locally by `enforce_secure`) so other
     // insecure-transport decisions - e.g. upload.rs's plaintext-upload-URL
     // check - can reuse the same opt-in instead of inventing a second,
@@ -73,6 +78,7 @@ impl Config {
     pub(crate) fn resolve(
         api_url_flag: Option<String>,
         web_url_flag: Option<String>,
+        docs_url_flag: Option<String>,
         force_insecure: bool,
     ) -> Result<Self, String> {
         let api_url = api_url_flag
@@ -126,6 +132,18 @@ impl Config {
         let web_url_explicit = web_url_from_user.is_some();
         let web_url = web_url_from_user.unwrap_or_else(|| DEFAULT_WEB_URL.to_string());
         let web_url = web_url.trim_end_matches('/').to_string();
+        let docs_url = docs_url_flag
+            .or_else(|| match std::env::var("KLAAY_DOCS_URL") {
+                Ok(v) => Some(v),
+                Err(std::env::VarError::NotPresent) => None,
+                Err(std::env::VarError::NotUnicode(v)) => {
+                    eprintln!(
+                        "Warning: KLAAY_DOCS_URL contains non-UTF-8 bytes ({v:?}) - ignoring it."
+                    );
+                    None
+                }
+            })
+            .map(|url| url.trim_end_matches('/').to_string());
         // Either the flag or the env var opts in - a script/CI pipeline that
         // can't easily pass a flag can still set the env var, same pattern
         // as KLAAY_API_URL above. Checked against a specific truthy value,
@@ -224,10 +242,16 @@ impl Config {
         // same class of mistake - hold it to the same standard.
         enforce_secure(&web_url, effective_force_insecure)
             .map_err(|e| format!("--web-url / KLAAY_WEB_URL: {e}"))?;
+        // The docs site receives the token, so it meets the same standard.
+        if let Some(docs_url) = &docs_url {
+            enforce_secure(docs_url, effective_force_insecure)
+                .map_err(|e| format!("--docs-url / KLAAY_DOCS_URL: {e}"))?;
+        }
         Ok(Config {
             api_url,
             web_url,
             web_url_explicit,
+            docs_url,
             force_insecure: effective_force_insecure,
         })
     }
@@ -242,6 +266,20 @@ impl Config {
 
     pub(crate) fn web_url_explicit(&self) -> bool {
         self.web_url_explicit
+    }
+
+    /// The docs site to read the API description from. The request carries the
+    /// user's token, so the default site serves only the default API: a token
+    /// for another API goes only to a site the user names.
+    pub(crate) fn spec_source(&self) -> Result<&str, String> {
+        match &self.docs_url {
+            Some(docs_url) => Ok(docs_url),
+            None if self.api_url == DEFAULT_API_URL => Ok(DEFAULT_DOCS_URL),
+            None => Err(format!(
+                "The API reference comes from a docs site, and {DEFAULT_DOCS_URL} accepts only a token for {DEFAULT_API_URL}.\nSet --docs-url or KLAAY_DOCS_URL to a docs site that accepts your token for {}.",
+                self.api_url
+            )),
+        }
     }
 
     /// The same transport-security standard `resolve()` applies to the
@@ -432,11 +470,11 @@ pub(crate) fn credentials_fallback_path() -> Option<PathBuf> {
 }
 
 /// The OpenAPI spec is cached to this one shared path regardless of which
-/// `api_url` is active - but unlike a stale comment that used to live here,
+/// docs site served it - but unlike a stale comment that used to live here,
 /// this doesn't mean switching environments silently serves old data:
-/// `schema::fetch_spec` embeds the `api_url` it fetched the spec from inside
+/// `schema::fetch_spec` embeds the `docs_url` it fetched the spec from inside
 /// the cached JSON itself, and re-fetches whenever the currently active
-/// `api_url` doesn't match what's stored there. So the path itself is
+/// docs site doesn't match what's stored there. So the path itself is
 /// shared, but the content is still correctly invalidated per environment.
 pub(crate) fn openapi_cache_path() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("openapi-cache.json"))
@@ -613,7 +651,7 @@ mod tests {
             ],
             || {
                 let config =
-                    Config::resolve(Some("https://api.klaay.com".to_string()), None, false)
+                    Config::resolve(Some("https://api.klaay.com".to_string()), None, None, false)
                         .expect("an https URL should resolve without error");
                 assert_eq!(config.api_url(), "https://api.klaay.com");
             },
@@ -633,7 +671,9 @@ mod tests {
                 // produce a working request must fail fast even with
                 // `--force-insecure`, which only exists to unblock a genuine
                 // plaintext-transport tradeoff, not a structurally broken URL.
-                assert!(Config::resolve(Some("not a valid url".to_string()), None, true).is_err());
+                assert!(
+                    Config::resolve(Some("not a valid url".to_string()), None, None, true).is_err()
+                );
             },
         );
     }
@@ -648,7 +688,8 @@ mod tests {
             ],
             || {
                 assert!(
-                    Config::resolve(Some("ftp://api.klaay.com".to_string()), None, true).is_err()
+                    Config::resolve(Some("ftp://api.klaay.com".to_string()), None, None, true)
+                        .is_err()
                 );
             },
         );
@@ -664,7 +705,8 @@ mod tests {
             ],
             || {
                 assert!(
-                    Config::resolve(Some("http://example.com".to_string()), None, false).is_err()
+                    Config::resolve(Some("http://example.com".to_string()), None, None, false)
+                        .is_err()
                 );
             },
         );
@@ -680,7 +722,8 @@ mod tests {
             ],
             || {
                 assert!(
-                    Config::resolve(Some("http://example.com".to_string()), None, true).is_ok()
+                    Config::resolve(Some("http://example.com".to_string()), None, None, true)
+                        .is_ok()
                 );
             },
         );
@@ -696,13 +739,14 @@ mod tests {
             ],
             || {
                 let config =
-                    Config::resolve(Some("https://api.klaay.com".to_string()), None, false)
+                    Config::resolve(Some("https://api.klaay.com".to_string()), None, None, false)
                         .expect("resolves");
                 assert_eq!(config.web_url(), DEFAULT_WEB_URL);
 
                 let config = Config::resolve(
                     Some("https://api.klaay.com".to_string()),
                     Some("https://web.example.com///".to_string()),
+                    None,
                     false,
                 )
                 .expect("resolves");
@@ -721,7 +765,7 @@ mod tests {
             ],
             || {
                 let config =
-                    Config::resolve(Some("https://api.klaay.com".to_string()), None, false)
+                    Config::resolve(Some("https://api.klaay.com".to_string()), None, None, false)
                         .expect("resolves");
                 assert_eq!(config.web_url(), "https://web.env.example.com");
             },
@@ -740,6 +784,7 @@ mod tests {
                 let err = Config::resolve(
                     Some("https://api.klaay.com".to_string()),
                     Some("http://web.example.com".to_string()),
+                    None,
                     false,
                 )
                 .expect_err("plaintext web url must be rejected");
@@ -769,7 +814,7 @@ mod tests {
                 ("KLAAY_WEB_URL", None),
             ],
             || {
-                let result = Config::resolve(None, None, false);
+                let result = Config::resolve(None, None, None, false);
                 assert_eq!(
                     result
                         .expect("a safe https URL from the env var should resolve")
@@ -799,7 +844,8 @@ mod tests {
             ],
             || {
                 // No `--force-insecure` flag (`false`) - only the env var opts in.
-                let result = Config::resolve(Some("http://example.com".to_string()), None, false);
+                let result =
+                    Config::resolve(Some("http://example.com".to_string()), None, None, false);
                 assert!(result.is_ok());
             },
         );
@@ -820,9 +866,86 @@ mod tests {
                 ("KLAAY_WEB_URL", None),
             ],
             || {
-                let result = Config::resolve(Some("http://example.com".to_string()), None, false);
+                let result =
+                    Config::resolve(Some("http://example.com".to_string()), None, None, false);
                 assert!(result.is_err());
             },
         );
+    }
+
+    fn spec_source(api_url: &str, docs_url: Option<&str>) -> Result<String, String> {
+        temp_env::with_vars(
+            [
+                ("KLAAY_API_URL", None::<&str>),
+                ("KLAAY_WEB_URL", None::<&str>),
+                ("KLAAY_DOCS_URL", None::<&str>),
+                ("KLAAY_ALLOW_INSECURE", None::<&str>),
+            ],
+            || {
+                Config::resolve(
+                    Some(api_url.to_string()),
+                    None,
+                    docs_url.map(str::to_string),
+                    false,
+                )?
+                .spec_source()
+                .map(str::to_string)
+            },
+        )
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn the_production_api_reads_the_description_from_the_default_docs_site() {
+        assert_eq!(
+            spec_source("https://api.klaay.com/", None).unwrap(),
+            "https://docs.klaay.com"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn another_api_never_sends_its_token_to_the_default_docs_site() {
+        for api_url in ["http://localhost:3000", "https://api.klaay.dev"] {
+            let err = spec_source(api_url, None).unwrap_err();
+            assert!(err.contains("KLAAY_DOCS_URL"), "{err}");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn a_named_docs_site_is_used_for_any_api() {
+        assert_eq!(
+            spec_source("http://localhost:3000", Some("http://localhost:8080/")).unwrap(),
+            "http://localhost:8080"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn the_docs_url_comes_from_klaay_docs_url_when_there_is_no_flag() {
+        temp_env::with_vars(
+            [
+                ("KLAAY_WEB_URL", None),
+                ("KLAAY_DOCS_URL", Some("https://docs.env.example.com/")),
+                ("KLAAY_ALLOW_INSECURE", None),
+            ],
+            || {
+                let config =
+                    Config::resolve(Some("https://api.klaay.com".to_string()), None, None, false)
+                        .unwrap();
+                assert_eq!(
+                    config.spec_source().unwrap(),
+                    "https://docs.env.example.com"
+                );
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn a_plaintext_docs_url_is_refused() {
+        let err = spec_source("https://api.klaay.com", Some("http://example.com")).unwrap_err();
+        assert!(err.contains("--docs-url / KLAAY_DOCS_URL"), "{err}");
     }
 }

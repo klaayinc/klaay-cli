@@ -391,7 +391,7 @@ impl ApiClient {
 
     /// "Hit an arbitrary path" primitive for endpoints outside the standard
     /// list/get shape (GET /me, .../stats). Backs `klaay call` and is reused by
-    /// `whoami`/`print_status`/`schema::fetch_spec`. Takes `HttpMethod` so an
+    /// `whoami`/`print_status`. Takes `HttpMethod` so an
     /// unsupported method fails at compile time. Unlike the resource methods,
     /// `path` gets no charset validation - it's the documented escape hatch for
     /// arbitrary paths; the host can't change and the server enforces its own
@@ -466,6 +466,13 @@ impl ApiClient {
             // its explicitly-empty body.
             None => send(req.send(()), &url),
         }
+    }
+
+    /// GET with redirects off, so the caller sees a sign-in redirect as a 302.
+    pub(crate) fn get_without_redirects(&self, path: &str) -> ApiResponse {
+        let url = self.url(path);
+        let req = self.agent.get(&url).config().max_redirects(0).build();
+        send(self.attach_auth(req).call(), &url)
     }
 
     /// Low-level POST for endpoints outside the JSON:API surface - backs the
@@ -657,9 +664,13 @@ fn send(result: Result<ureq::http::Response<ureq::Body>, ureq::Error>, url: &str
                         Some((i, _)) => (&text[..i], "..."),
                         None => (text.as_str(), ""),
                     };
-                    eprintln!(
-                        "Warning: response body was not valid JSON ({e}): {preview}{truncated}"
-                    );
+                    // A redirect carries an HTML stub that says nothing, and
+                    // its caller reports the status.
+                    if !(300..400).contains(&status) {
+                        eprintln!(
+                            "Warning: response body was not valid JSON ({e}): {preview}{truncated}"
+                        );
+                    }
                     // Keep the real status; a non-`Json` kind makes `is_success()`
                     // treat an unparseable 2xx as failure.
                     ApiResponse {
