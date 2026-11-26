@@ -54,6 +54,14 @@ fn web_url_help() -> String {
     )
 }
 
+fn docs_url_help() -> String {
+    format!(
+        "Override the docs site `resources` and `describe` read the API reference from (or set KLAAY_DOCS_URL). The default, {}, serves only {}.",
+        config::DEFAULT_DOCS_URL,
+        config::DEFAULT_API_URL
+    )
+}
+
 /// The string `--version` prints: the crate version, plus the build-time
 /// `KLAAY_VERSION_SUFFIX` when set (the nightly workflow passes
 /// `-nightly.YYYYMMDD`). A nightly binary must name the nightly it came
@@ -86,6 +94,9 @@ struct Cli {
     // Same runtime-help pattern as --api-url above, same reason.
     #[arg(long, global = true, help = web_url_help())]
     web_url: Option<String>,
+
+    #[arg(long, global = true, help = docs_url_help())]
+    docs_url: Option<String>,
 
     /// Allow --api-url to point at a non-loopback, non-HTTPS host, sending
     /// credentials/SSO tokens in plain text (also settable via
@@ -129,7 +140,7 @@ enum Commands {
     Logout,
     /// Show who you're logged in as (calls the real GET /me endpoint).
     Whoami,
-    /// List every resource type the API exposes, derived from GET /openapi.
+    /// List every resource type in the API reference on the docs site.
     #[command(after_help = "Example: klaay resources")]
     Resources {
         /// Force a re-fetch instead of using the cached spec.
@@ -328,8 +339,8 @@ fn parse_fields_arg(fields: Option<&str>) -> Option<(String, String)> {
 
 fn main() {
     let cli = Cli::parse();
-    let config =
-        Config::resolve(cli.api_url, cli.web_url, cli.force_insecure).unwrap_or_else(|e| {
+    let config = Config::resolve(cli.api_url, cli.web_url, cli.docs_url, cli.force_insecure)
+        .unwrap_or_else(|e| {
             eprintln!("Error: {e}");
             std::process::exit(1);
         });
@@ -366,14 +377,14 @@ fn main() {
         Commands::Logout => auth::logout(&config),
         Commands::Whoami => auth::whoami(&config),
         Commands::Resources { refresh } => {
-            let client = authenticated_client(&config);
+            let client = docs_client(&config);
             let spec = schema::fetch_spec(&client, refresh).unwrap_or_else(|e| exit_with_error(e));
             if let Err(e) = schema::list_resources(&spec) {
                 exit_with_error(e);
             }
         }
         Commands::Describe { resource, refresh } => {
-            let client = authenticated_client(&config);
+            let client = docs_client(&config);
             let spec = schema::fetch_spec(&client, refresh).unwrap_or_else(|e| exit_with_error(e));
             if let Err(e) = schema::describe(&spec, &resource) {
                 exit_with_error(e);
@@ -635,6 +646,17 @@ fn authenticated_client(config: &Config) -> ApiClient {
     // (zeroized) allocation - `stored` itself is then dropped normally here,
     // zeroizing its own copy of the token too.
     ApiClient::new(config.api_url().to_string(), Some(stored.token.clone()))
+}
+
+/// A client for the docs site that serves the API description. It carries the
+/// same token as `authenticated_client`.
+fn docs_client(config: &Config) -> ApiClient {
+    let docs_url = config
+        .spec_source()
+        .unwrap_or_else(|e| exit_with_error(e))
+        .to_string();
+    let stored = auth::require_login(config);
+    ApiClient::new(docs_url, Some(stored.token.clone()))
 }
 
 /// Sets `data.type`, erroring rather than silently overwriting if `--data`

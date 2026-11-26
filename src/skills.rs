@@ -4,7 +4,7 @@
 //! commonly used alongside. This is content Kiln's own OpenAPI spec doesn't
 //! (and structurally can't) capture - it's narrative/workflow knowledge, not
 //! a filter or attribute list - so it's embedded at compile time from
-//! skills/*.md rather than fetched live. Grounded in the klaay-api skill's
+//! skills/*.md rather than fetched at run time. Grounded in the klaay-api skill's
 //! workflows.md and real model associations, not invented.
 //!
 //! Covers the ~20 resources central to the SOC 2 journey, not all ~100+

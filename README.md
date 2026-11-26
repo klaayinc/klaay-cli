@@ -18,8 +18,7 @@ developer's behalf, this is the loop:
    token is cached (in the OS keychain when available) for ~3 months —
    every command after that just works with no re-authentication.
 2. `klaay resources` to see what's available — every resource type Klaay
-   exposes, derived live from the account's own `GET /openapi` spec, not a
-   hardcoded list.
+   exposes, from the API reference on the docs site, not a hardcoded list.
 3. `klaay describe <resource>` before your first `list`/`create`/`update`
    against any resource you haven't used yet. For the ~20 resources central
    to the SOC 2 journey (`selected_controls`, `evidence_checks`,
@@ -27,9 +26,8 @@ developer's behalf, this is the loop:
    `workstreams`, `compliance_stats`, etc.), this also prints hand-written
    guidance on what the resource *is*, where it fits in the compliance
    program, and which other resources it's normally used alongside — not
-   just mechanical params. Everything after that is live filters/sortable
-   fields/attributes pulled from the account's own spec — don't guess field
-   names.
+   just mechanical params. Everything after that is filters, sortable fields
+   and attributes from the same API reference — don't guess field names.
 4. From there, the generic commands (`list`, `get`, `create`, `update`,
    `delete`, `status`, `call`) cover the rest.
 
@@ -48,12 +46,12 @@ them without a warning. The Windows build is not signed yet.
 
 ```bash
 # macOS (Apple silicon)
-curl -LO https://github.com/klaayinc/klaay-cli/releases/latest/download/klaay_0.1.0_macOS_arm64.zip
-unzip klaay_0.1.0_macOS_arm64.zip && chmod +x klaay && sudo mv klaay /usr/local/bin/
+curl -LO https://github.com/klaayinc/klaay-cli/releases/latest/download/klaay_0.3.0_macOS_arm64.zip
+unzip klaay_0.3.0_macOS_arm64.zip && chmod +x klaay && sudo mv klaay /usr/local/bin/
 
 # Linux x86_64
-curl -LO https://github.com/klaayinc/klaay-cli/releases/latest/download/klaay_0.1.0_Linux_x86_64.tar.gz
-tar -xzf klaay_0.1.0_Linux_x86_64.tar.gz && sudo mv klaay /usr/local/bin/
+curl -LO https://github.com/klaayinc/klaay-cli/releases/latest/download/klaay_0.3.0_Linux_x86_64.tar.gz
+tar -xzf klaay_0.3.0_Linux_x86_64.tar.gz && sudo mv klaay /usr/local/bin/
 ```
 
 There is no crates.io listing and no Homebrew tap yet.
@@ -127,6 +125,17 @@ Point at a non-default environment (e.g. local dev) with `--api-url` /
 `KLAAY_API_URL` (default `https://api.klaay.com`) and, for the browser flow,
 `--web-url` / `KLAAY_WEB_URL` (default `https://app.klaay.com`).
 
+## API reference
+
+`klaay resources` and `klaay describe` read `openapi.json` from the docs site,
+`https://docs.klaay.com`. The request carries your token, because the docs site
+asks for a sign-in.
+
+The default docs site serves only `https://api.klaay.com`. With another
+`--api-url`, set `--docs-url` / `KLAAY_DOCS_URL` to a docs site that accepts
+your token. The CLI sends your token to that address, so name only a site you
+trust. The other commands need no docs site.
+
 ## Commands
 
 | Command | What it does |
@@ -134,8 +143,8 @@ Point at a non-default environment (e.g. local dev) with `--api-url` /
 | `klaay login` | Authenticate and store a token (browser sign-in, `--no-browser`, or `--with-token`) |
 | `klaay logout` | Clear the stored token |
 | `klaay whoami` | Show the current session (calls `GET /me`) |
-| `klaay resources` | List every resource type, derived from `GET /openapi` |
-| `klaay describe <resource>` | Show what a resource is, its role in the SOC 2 journey, and commonly-paired resources (for the ~20 core resources — see below), plus live filters/sortable fields/attributes for any resource |
+| `klaay resources` | List every resource type, from the API reference on the docs site |
+| `klaay describe <resource>` | Show what a resource is, its role in the SOC 2 journey, and commonly-paired resources (for the ~20 core resources — see below), plus filters, sortable fields and attributes for any resource |
 | `klaay list <resource>` | List a collection — `--filter k=v` (repeat for multi-value), `--sort`, `--include`, `--fields`, `--page-number`, `--page-size` |
 | `klaay get <resource> <id>` | Fetch one resource — `--include`, `--fields` |
 | `klaay create <resource>` | Create — `--data '<json fragment>'`, `--file relationship=path` (repeatable) |
@@ -168,12 +177,12 @@ fits into the program (grounded in Klaay's own compliance-workflow
 documentation and real model relationships, not invented), and which other
 resources it's normally used alongside. These are embedded into the binary
 at compile time (`src/skills.rs`) and shown by `klaay describe <resource>`
-above the live spec-derived section. This is content the OpenAPI spec
+above the section from the API reference. This is content the OpenAPI spec
 can't capture on its own — it's narrative workflow knowledge, not a filter
 or attribute list — so it's curated here instead of auto-derived.
 
 Resources outside this set still get full `describe` output — just the
-live filters/sortable fields/attributes section, no curated intro. Extend
+filters, sortable fields and attributes section, no curated intro. Extend
 coverage by adding `skills/<resource>.md` and a match arm in
 `src/skills.rs`.
 
