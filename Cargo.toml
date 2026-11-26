@@ -152,6 +152,25 @@ sha2 = "0.11"
 # `%`/`^` inside the URL) - one small, well-established dependency instead
 # of three hand-rolled per-OS branches.
 open = "5"
+# Unpack the release archives `release.yml` builds: a .zip on macOS and
+# Windows, a .tar.gz on Linux. No default features: the default "xattr"
+# feature pulls in extended-attribute code this crate never uses.
+tar = { version = "0.4", default-features = false }
+# Already in the tree through ureq's gzip support. Declared directly because
+# upgrade.rs reads the gzip layer of the Linux archive itself. The default
+# pure-Rust backend (miniz_oxide) builds on every release target, musl
+# included, with no C compiler.
+flate2 = "1.1"
+# Deflate through flate2 only. The default features add AES, bzip2, zstd, xz
+# and zopfli, which no release archive uses.
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+
+# `klaay upgrade` (upgrade.rs) swaps the running binary for the new one. A
+# running .exe cannot be overwritten on Windows, so this crate moves it aside
+# first. Unix renames over the file in upgrade.rs itself: this crate follows a
+# relative symlink from the wrong folder, and Homebrew installs one.
+[target.'cfg(windows)'.dependencies]
+self-replace = "1.5"
 
 [dev-dependencies]
 # Serializes the env-var-mutating tests in config.rs's test module -

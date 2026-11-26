@@ -152,6 +152,7 @@ trust. The other commands need no docs site.
 | `klaay delete <resource> <id>` | Delete |
 | `klaay call <method> <path>` | Low-level escape hatch for non-CRUD endpoints (`GET /me`, `.../stats`, etc.) |
 | `klaay status` | Readiness snapshot — same numbers as the "Road to Readiness" widget (admin-only) |
+| `klaay upgrade` | Download the newest stable release and replace this binary. A binary in a folder you cannot write, such as `/usr/local/bin`, needs `sudo klaay upgrade` |
 
 Run `klaay <command> --help` for a worked example of any command.
 
