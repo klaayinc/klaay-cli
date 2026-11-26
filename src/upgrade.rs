@@ -24,10 +24,10 @@ const RELEASES_URL_ENV: &str = "KLAAY_RELEASES_URL";
 const MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 128 * 1024 * 1024;
 
-/// A release version. `0.2.0-nightly.20261120` is a build of the code that
-/// comes after `v0.2.0` (see `compose_version` in main.rs), so it ranks above
-/// `0.2.0` and below `0.3.0`. The derived order does this: the fields compare
-/// in turn, and `None` is below `Some`.
+/// A release version. `0.2.0-nightly.20261120` is a build of the code after
+/// `v0.2.0` (see `compose_version` in main.rs). It ranks above `0.2.0` and
+/// below `0.3.0`. The derived order does this: the fields compare in turn,
+/// and `None` is below `Some`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Version {
     major: u64,
@@ -210,8 +210,10 @@ pub(crate) fn run(config: &Config) -> Result<(), String> {
     let (staged, mut file) = stage(dir, &exe)?;
     let archive = download(&agent, &asset.browser_download_url)?;
     let binary = extract_binary(&archive, &build)?;
+    // Flushed to disk before the swap, so a crash after the rename cannot
+    // leave an empty file in place of the binary.
     file.write_all(&binary)
-        .and_then(|()| file.flush())
+        .and_then(|()| file.sync_all())
         .map_err(|e| write_error(&e, dir, &exe))?;
     // Windows cannot copy a file that is still open.
     drop(file);
@@ -261,10 +263,14 @@ fn stage(dir: &Path, exe: &Path) -> Result<(Staged, File), String> {
 /// The message for a failed write next to the binary. The common cause is a
 /// binary in a folder only an administrator can write, such as /usr/local/bin.
 fn write_error(error: &io::Error, dir: &Path, exe: &Path) -> String {
-    if !matches!(
-        error.kind(),
-        io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
-    ) {
+    // `sudo` cannot write to a read-only file system, so it gets no `sudo` hint.
+    if error.kind() == io::ErrorKind::ReadOnlyFilesystem {
+        return format!(
+            "Error: {} is on a read-only file system, so klaay cannot replace it.\nUpgrade klaay with the tool that installed it.",
+            exe.display()
+        );
+    }
+    if error.kind() != io::ErrorKind::PermissionDenied {
         return format!("Error: cannot replace {}: {error}", exe.display());
     }
     let bin = config::bin_name();
@@ -540,6 +546,14 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("sudo") || cfg!(windows), "{message}");
+    }
+
+    #[test]
+    fn a_read_only_file_system_does_not_suggest_sudo() {
+        let error = io::Error::from(io::ErrorKind::ReadOnlyFilesystem);
+        let message = write_error(&error, Path::new("/bin"), Path::new("/bin/klaay"));
+        assert!(message.contains("read-only"), "{message}");
+        assert!(!message.contains("sudo"), "{message}");
     }
 
     #[test]

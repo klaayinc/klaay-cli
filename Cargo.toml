@@ -167,7 +167,7 @@ zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 # `klaay upgrade` (upgrade.rs) swaps the running binary for the new one. A
 # running .exe cannot be overwritten on Windows, so this crate moves it aside
-# first. Unix renames over the file in upgrade.rs itself: this crate follows a
+# first. Unix renames over the file in upgrade.rs itself. This crate follows a
 # relative symlink from the wrong folder, and Homebrew installs one.
 [target.'cfg(windows)'.dependencies]
 self-replace = "1.5"
