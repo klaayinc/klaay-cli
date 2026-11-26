@@ -664,9 +664,13 @@ fn send(result: Result<ureq::http::Response<ureq::Body>, ureq::Error>, url: &str
                         Some((i, _)) => (&text[..i], "..."),
                         None => (text.as_str(), ""),
                     };
-                    eprintln!(
-                        "Warning: response body was not valid JSON ({e}): {preview}{truncated}"
-                    );
+                    // A redirect carries an HTML stub that says nothing, and
+                    // its caller reports the status.
+                    if !(300..400).contains(&status) {
+                        eprintln!(
+                            "Warning: response body was not valid JSON ({e}): {preview}{truncated}"
+                        );
+                    }
                     // Keep the real status; a non-`Json` kind makes `is_success()`
                     // treat an unparseable 2xx as failure.
                     ApiResponse {

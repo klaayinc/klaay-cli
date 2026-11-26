@@ -98,7 +98,7 @@ struct Cli {
     #[arg(long, global = true, help = docs_url_help())]
     docs_url: Option<String>,
 
-    /// Allow --api-url to point at a non-loopback, non-HTTPS host, sending
+    /// Allow --api-url, --web-url and --docs-url to point at a non-loopback, non-HTTPS host, sending
     /// credentials/SSO tokens in plain text (also settable via
     /// KLAAY_ALLOW_INSECURE=1/true/yes). Off by default: without this, such
     /// a URL is a hard error rather than a warning a script might never
