@@ -140,14 +140,19 @@ impl Build {
     }
 }
 
-fn agent() -> ureq::Agent {
+/// A client that gives up after `global_timeout`.
+pub(crate) fn agent(global_timeout: Duration) -> ureq::Agent {
     ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
             .user_agent(concat!("klaay-cli/", env!("CARGO_PKG_VERSION")))
-            .timeout_connect(Some(Duration::from_secs(10)))
-            .timeout_global(Some(Duration::from_secs(120)))
+            .timeout_connect(Some(global_timeout.min(Duration::from_secs(10))))
+            .timeout_global(Some(global_timeout))
             .build(),
     )
+}
+
+pub(crate) fn releases_url() -> String {
+    std::env::var(RELEASES_URL_ENV).unwrap_or_else(|_| DEFAULT_RELEASES_URL.to_string())
 }
 
 pub(crate) fn latest_release(agent: &ureq::Agent, url: &str) -> Result<Release, String> {
@@ -165,10 +170,9 @@ pub(crate) fn run(config: &Config) -> Result<(), String> {
         format!("Error: cannot read the version of this binary ({current_text}).")
     })?;
 
-    let releases_url =
-        std::env::var(RELEASES_URL_ENV).unwrap_or_else(|_| DEFAULT_RELEASES_URL.to_string());
+    let releases_url = releases_url();
     config.check_url_security(&releases_url)?;
-    let agent = agent();
+    let agent = agent(Duration::from_secs(120));
     let release = latest_release(&agent, &releases_url)?;
     let latest = release.version()?;
 

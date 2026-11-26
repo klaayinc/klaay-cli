@@ -480,6 +480,13 @@ pub(crate) fn openapi_cache_path() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("openapi-cache.json"))
 }
 
+/// The newest stable release the last version check found (see
+/// update_check.rs). Not tied to `api_url`: it describes this CLI, not an
+/// environment.
+pub(crate) fn latest_release_cache_path() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("latest-release.json"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
