@@ -160,7 +160,8 @@ When a newer stable release exists, each command prints a two-line banner on
 stderr. It names your version, the newest version, and `klaay upgrade`. Stdout
 stays the same. The CLI asks GitHub for the newest release at most once a day,
 in a background process, and keeps the answer in `latest-release.json` in its
-config directory. A failed check changes nothing. Set `KLAAY_NO_UPDATE_CHECK=1`
+config directory. A failed check keeps the old answer and waits a day before
+it tries again. Set `KLAAY_NO_UPDATE_CHECK=1`
 to turn the check and the banner off.
 
 ## Filters — array vs scalar

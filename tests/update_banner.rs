@@ -5,6 +5,10 @@
 //! before any network call. That makes it the case the banner must survive:
 //! a command that ends early, with nothing on stdout.
 
+// Windows reads its config folder from the Known Folder API, which a test
+// cannot point at a temp directory, so these tests would use the real one.
+#![cfg(not(windows))]
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -59,7 +63,9 @@ impl Home {
             .env("HOME", &self.root)
             .env("XDG_CONFIG_HOME", self.root.join(".config"))
             .env("APPDATA", self.root.join("appdata"))
-            .env("KLAAY_RELEASES_URL", releases_url);
+            .env("KLAAY_RELEASES_URL", releases_url)
+            // A shell that sets the opt-out would hide every banner here.
+            .env_remove("KLAAY_NO_UPDATE_CHECK");
         for (key, value) in extra_env {
             command.env(key, value);
         }
