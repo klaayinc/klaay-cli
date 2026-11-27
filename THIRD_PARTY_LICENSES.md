@@ -1,6 +1,6 @@
 # Third-party licenses
 
-This binary statically links the 261 Rust crates listed below (via `cargo
+This binary statically links the 269 Rust crates listed below (via `cargo
 metadata`). Every one uses a permissive license (MIT, Apache-2.0, BSD,
 ISC, Unicode-3.0, 0BSD, Zlib, Unlicense, CDLA-Permissive-2.0) or a
 file-scoped weak-copyleft license used unmodified (MPL-2.0, `option-ext`)
@@ -54,6 +54,7 @@ cargo metadata --format-version 1 \
 | cbc | 0.1.2 | MIT OR Apache-2.0 |
 | cc | 1.2.66 | MIT OR Apache-2.0 |
 | cfg-if | 1.0.4 | MIT OR Apache-2.0 |
+| cfg_aliases | 0.2.2 | MIT |
 | chrono | 0.4.45 | MIT OR Apache-2.0 |
 | cipher | 0.4.4 | MIT OR Apache-2.0 |
 | clap | 4.6.1 | MIT OR Apache-2.0 |
@@ -63,6 +64,7 @@ cargo metadata --format-version 1 \
 | colorchoice | 1.0.5 | MIT OR Apache-2.0 |
 | concurrent-queue | 2.5.0 | Apache-2.0 OR MIT |
 | const-oid | 0.10.2 | Apache-2.0 OR MIT |
+| constant_time_eq | 0.6.2 | CC0-1.0 OR MIT-0 OR Apache-2.0 |
 | cookie | 0.18.1 | MIT OR Apache-2.0 |
 | cookie_store | 0.22.1 | MIT OR Apache-2.0 |
 | core-foundation | 0.10.1 | MIT OR Apache-2.0 |
@@ -87,6 +89,7 @@ cargo metadata --format-version 1 \
 | event-listener | 5.4.1 | Apache-2.0 OR MIT |
 | event-listener-strategy | 0.5.4 | Apache-2.0 OR MIT |
 | fastrand | 2.4.1 | Apache-2.0 OR MIT |
+| filetime | 0.2.30 | MIT/Apache-2.0 |
 | find-msvc-tools | 0.1.9 | MIT OR Apache-2.0 |
 | flate2 | 1.1.9 | MIT OR Apache-2.0 |
 | form_urlencoded | 1.2.2 | MIT OR Apache-2.0 |
@@ -140,6 +143,7 @@ cargo metadata --format-version 1 \
 | memchr | 2.8.3 | Unlicense OR MIT |
 | memoffset | 0.9.1 | MIT |
 | miniz_oxide | 0.8.9 | MIT OR Zlib OR Apache-2.0 |
+| nix | 0.32.0 | MIT |
 | num | 0.4.3 | MIT OR Apache-2.0 |
 | num-bigint | 0.4.8 | MIT OR Apache-2.0 |
 | num-complex | 0.4.6 | MIT OR Apache-2.0 |
@@ -188,6 +192,7 @@ cargo metadata --format-version 1 \
 | secret-service | 5.1.0 | MIT OR Apache-2.0 |
 | security-framework | 3.7.0 | MIT OR Apache-2.0 |
 | security-framework-sys | 2.17.0 | MIT OR Apache-2.0 |
+| self-replace | 1.5.1 | Apache-2.0 |
 | serde | 1.0.228 | MIT OR Apache-2.0 |
 | serde_core | 1.0.228 | MIT OR Apache-2.0 |
 | serde_derive | 1.0.228 | MIT OR Apache-2.0 |
@@ -207,6 +212,7 @@ cargo metadata --format-version 1 \
 | subtle | 2.6.1 | BSD-3-Clause |
 | syn | 2.0.118 | MIT OR Apache-2.0 |
 | synstructure | 0.13.2 | MIT |
+| tar | 0.4.46 | MIT OR Apache-2.0 |
 | temp-env | 0.3.6 | MIT OR Apache-2.0 |
 | tempfile | 3.27.0 | MIT OR Apache-2.0 |
 | thiserror | 1.0.69 | MIT OR Apache-2.0 |
@@ -223,6 +229,7 @@ cargo metadata --format-version 1 \
 | tracing | 0.1.44 | MIT |
 | tracing-attributes | 0.1.31 | MIT |
 | tracing-core | 0.1.36 | MIT |
+| typed-path | 0.13.0 | MIT OR Apache-2.0 |
 | typenum | 1.20.1 | MIT OR Apache-2.0 |
 | uds_windows | 1.2.1 | MIT |
 | unicode-ident | 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 |
@@ -277,6 +284,7 @@ cargo metadata --format-version 1 \
 | zerotrie | 0.2.4 | Unicode-3.0 |
 | zerovec | 0.11.6 | Unicode-3.0 |
 | zerovec-derive | 0.11.3 | Unicode-3.0 |
+| zip | 9.8.2 | MIT |
 | zmij | 1.0.21 | MIT |
 | zvariant | 5.13.0 | MIT |
 | zvariant_derive | 5.13.0 | MIT |

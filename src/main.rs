@@ -6,6 +6,7 @@ mod format;
 mod schema;
 mod skills;
 mod token_store;
+mod upgrade;
 mod upload;
 mod web_login;
 
@@ -71,11 +72,19 @@ fn compose_version(base: &str, suffix: Option<&str>) -> String {
     format!("{base}{}", suffix.unwrap_or(""))
 }
 
+/// The version of this binary, as `--version` prints it.
+fn current_version() -> String {
+    compose_version(
+        env!("CARGO_PKG_VERSION"),
+        option_env!("KLAAY_VERSION_SUFFIX"),
+    )
+}
+
 #[derive(Parser)]
 #[command(
     name = "klaay",
     about = "Command-line client for the Klaay API",
-    version = compose_version(env!("CARGO_PKG_VERSION"), option_env!("KLAAY_VERSION_SUFFIX"))
+    version = current_version()
 )]
 struct Cli {
     // `help = api_url_help()`, not a `///` doc comment with the URL spelled
@@ -229,6 +238,9 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Download the newest stable release and replace this binary with it.
+    #[command(after_help = "Example: klaay upgrade")]
+    Upgrade,
 }
 
 /// Parses a `--data`/`--filter` JSON argument or exits with a clear message -
@@ -628,6 +640,7 @@ fn main() {
             let client = authenticated_client(&config);
             client::print_status(&client, json);
         }
+        Commands::Upgrade => upgrade::run(&config).unwrap_or_else(|e| exit_with_error(e)),
     }
 }
 
