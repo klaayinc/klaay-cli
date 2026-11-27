@@ -6,6 +6,7 @@ mod format;
 mod schema;
 mod skills;
 mod token_store;
+mod update_check;
 mod upgrade;
 mod upload;
 mod web_login;
@@ -241,6 +242,10 @@ enum Commands {
     /// Download the newest stable release and replace this binary with it.
     #[command(after_help = "Example: klaay upgrade")]
     Upgrade,
+    /// Ask GitHub for the newest release and store the answer for the update
+    /// banner. Every command starts this one in the background.
+    #[command(hide = true)]
+    RefreshLatestRelease,
 }
 
 /// Parses a `--data`/`--filter` JSON argument or exits with a clear message -
@@ -356,6 +361,13 @@ fn main() {
             eprintln!("Error: {e}");
             std::process::exit(1);
         });
+
+    if !matches!(
+        cli.command,
+        Commands::Upgrade | Commands::RefreshLatestRelease
+    ) {
+        update_check::announce_and_refresh();
+    }
 
     match cli.command {
         Commands::Login {
@@ -641,6 +653,7 @@ fn main() {
             client::print_status(&client, json);
         }
         Commands::Upgrade => upgrade::run(&config).unwrap_or_else(|e| exit_with_error(e)),
+        Commands::RefreshLatestRelease => update_check::refresh(&config),
     }
 }
 

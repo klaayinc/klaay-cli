@@ -11,6 +11,9 @@ use std::process::Command;
 fn login_with(flag: &str, value: &str) -> (bool, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_klaay"))
         .args(["login", flag, value])
+        // Without this, the run writes the real config directory and starts a
+        // real call to GitHub (see update_check.rs).
+        .env("KLAAY_NO_UPDATE_CHECK", "1")
         .output()
         .expect("run klaay login");
     let text = format!(
